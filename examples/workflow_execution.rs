@@ -9,22 +9,7 @@ fn main() {
 
     let workflow = {
         let world = app.world_mut();
-        let provider = spawn_provider(
-            world,
-            ProviderSpec::new(ProviderKind::OpenAi, "openai"),
-            ProviderCapabilities::text_tooling(),
-        );
-        let model = spawn_model(
-            world,
-            provider,
-            ModelSpec::new("gpt-4o-mini"),
-            ModelCapabilities::chat_with_tools(),
-            128_000,
-        )
-        .expect("model should register");
-        let reviewer = spawn_agent_from_model(world, "reviewer", model)
-            .expect("reviewer agent should spawn")
-            .agent;
+        let reviewer = spawn_agent(world, AgentSpec::new("reviewer", "mock-reviewer")).agent;
         let uppercase_tool = world
             .spawn(ToolBundle::new(ToolSpec::new(
                 "uppercase",

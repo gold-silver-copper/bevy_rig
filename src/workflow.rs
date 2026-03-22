@@ -10,6 +10,7 @@ use thiserror::Error;
 
 use crate::{
     agent::AgentSpec,
+    rig_runtime::execute_agent_prompt,
     session::{ChatMessageBundle, ChatMessageRole, SessionBundle},
     tool::{ToolCall, dispatch_tool},
 };
@@ -233,6 +234,8 @@ enum WorkflowExecutionError {
     InvalidNode(Entity),
     #[error("workflow node {0:?} is missing a binding")]
     MissingBinding(Entity),
+    #[error("workflow agent node {node:?} failed: {error}")]
+    AgentFailure { node: Entity, error: String },
     #[error("workflow tool node {node:?} failed: {error}")]
     ToolFailure { node: Entity, error: String },
 }
@@ -588,10 +591,32 @@ fn execute_workflow_node(
                 .get::<WorkflowBinding>(node)
                 .copied()
                 .ok_or(WorkflowExecutionError::MissingBinding(node))?;
-            let spec = world
-                .get::<AgentSpec>(binding.0)
-                .ok_or(WorkflowExecutionError::MissingBinding(node))?;
-            format!("{} ({}) processed: {}", spec.name, spec.model, input)
+            let spec = world.get::<AgentSpec>(binding.0).cloned().ok_or(
+                WorkflowExecutionError::AgentFailure {
+                    node,
+                    error: format!("agent {:?} is missing AgentSpec", binding.0),
+                },
+            )?;
+
+            if spec.provider.is_some() {
+                let session = world.get::<WorkflowRunSession>(invocation).copied().ok_or(
+                    WorkflowExecutionError::AgentFailure {
+                        node,
+                        error: format!(
+                            "workflow invocation {:?} is missing its session",
+                            invocation
+                        ),
+                    },
+                )?;
+
+                execute_agent_prompt(world, binding.0, input, Some(session.0), Some(input))
+                    .map_err(|error| WorkflowExecutionError::AgentFailure {
+                        node,
+                        error: error.to_string(),
+                    })?
+            } else {
+                format!("{} ({}) processed: {}", spec.name, spec.model, input)
+            }
         }
         WorkflowNodeKind::Tool => {
             let binding = world

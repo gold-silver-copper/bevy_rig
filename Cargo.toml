@@ -2,6 +2,25 @@
 name = "bevy_rig"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+description = "Bevy ECS primitives and systems for modeling providers, agents, tools, sessions, runs, and workflows on top of Rig."
+license = "MIT"
+readme = "README.md"
+documentation = "https://docs.rs/bevy_rig"
+keywords = ["bevy", "ecs", "llm", "agent", "rig"]
+categories = ["game-development", "asynchronous", "api-bindings"]
+include = [
+    "Cargo.toml",
+    "Cargo.lock",
+    "LICENSE",
+    "README.md",
+    "src/**",
+    "examples/**",
+    "docs/**",
+]
+
+[package.metadata.docs.rs]
+all-features = true
 
 [features]
 default = []

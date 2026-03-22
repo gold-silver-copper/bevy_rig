@@ -9,6 +9,7 @@ use crate::{
     diagnostics::{self, RuntimeDiagnostics},
     model::ModelRegistry,
     provider::ProviderRegistry,
+    rig_runtime::{self, RigRuntime},
     run::{self, CancelRun, RunAgent, RunCommitted, RunFailed, StreamCompleted, TextDelta},
     tool::{self, ToolCallCompleted, ToolCallFailed, ToolCallRequested, ToolRegistry},
     workflow::{self, RunWorkflow, WorkflowCommitted, WorkflowFailed},
@@ -36,6 +37,9 @@ pub struct RunPreparationSystems;
 pub struct RunExecutionSystems;
 
 #[derive(SystemSet, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct RigExecutionSystems;
+
+#[derive(SystemSet, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ToolDispatchSystems;
 
 #[derive(SystemSet, Clone, Debug, PartialEq, Eq, Hash)]
@@ -54,6 +58,7 @@ impl Plugin for BevyRigPlugin {
             .init_resource::<ModelRegistry>()
             .init_resource::<ContextIndex>()
             .init_resource::<RuntimeDiagnostics>()
+            .init_resource::<RigRuntime>()
             .add_message::<RunAgent>()
             .add_message::<CancelRun>()
             .add_message::<RunCommitted>()
@@ -74,7 +79,13 @@ impl Plugin for BevyRigPlugin {
             .configure_sets(RunPreparation, RunPreparationSystems)
             .configure_sets(
                 RunExecution,
-                (RunExecutionSystems, ToolDispatchSystems, StreamApplySystems).chain(),
+                (
+                    RigExecutionSystems,
+                    RunExecutionSystems,
+                    ToolDispatchSystems,
+                    StreamApplySystems,
+                )
+                    .chain(),
             )
             .configure_sets(RunCommit, RunCommitSystems)
             .add_systems(CatalogSync, context::rebuild_context_index)
@@ -88,6 +99,10 @@ impl Plugin for BevyRigPlugin {
                 )
                     .chain()
                     .in_set(RunPreparationSystems),
+            )
+            .add_systems(
+                RunExecution,
+                rig_runtime::execute_rig_runs.in_set(RigExecutionSystems),
             )
             .add_systems(
                 RunExecution,

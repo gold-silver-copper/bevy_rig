@@ -5,12 +5,14 @@ pub mod diagnostics;
 pub mod model;
 pub mod prelude;
 pub mod provider;
+pub mod rig_runtime;
 pub mod run;
 pub mod session;
 pub mod tool;
 pub mod workflow;
 
 pub use app::{
-    BevyRigPlugin, CatalogSync, RunCommit, RunCommitSystems, RunExecution, RunExecutionSystems,
-    RunPreparation, RunPreparationSystems, StreamApplySystems, Telemetry, ToolDispatchSystems,
+    BevyRigPlugin, CatalogSync, RigExecutionSystems, RunCommit, RunCommitSystems, RunExecution,
+    RunExecutionSystems, RunPreparation, RunPreparationSystems, StreamApplySystems, Telemetry,
+    ToolDispatchSystems,
 };

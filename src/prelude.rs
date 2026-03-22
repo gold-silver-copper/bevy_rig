@@ -5,8 +5,9 @@ pub use crate::{
         bind_model, spawn_agent, spawn_agent_from_model,
     },
     app::{
-        BevyRigPlugin, CatalogSync, RunCommit, RunCommitSystems, RunExecution, RunExecutionSystems,
-        RunPreparation, RunPreparationSystems, StreamApplySystems, Telemetry, ToolDispatchSystems,
+        BevyRigPlugin, CatalogSync, RigExecutionSystems, RunCommit, RunCommitSystems, RunExecution,
+        RunExecutionSystems, RunPreparation, RunPreparationSystems, StreamApplySystems, Telemetry,
+        ToolDispatchSystems,
     },
     context::{
         ContextBundle, ContextDocument, ContextEmbeddingStatus, ContextIndex, ContextMatch,
@@ -21,6 +22,7 @@ pub use crate::{
         Provider, ProviderBundle, ProviderCapabilities, ProviderKind, ProviderRegistry,
         ProviderSpec, RegisteredProvider, spawn_provider,
     },
+    rig_runtime::{RigExecutionError, RigRuntime, execute_rig_runs},
     run::{
         CancelRun, Run, RunAgent, RunBundle, RunCancellationReason, RunCommitted, RunContextQuery,
         RunFailed, RunFailure, RunFinalized, RunOwner, RunPrompt, RunRequest, RunResultText,
