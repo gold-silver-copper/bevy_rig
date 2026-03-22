@@ -11,7 +11,7 @@ use ratatui::{
 
 use crate::{
     components::{Glyph, Memory, MovePlan, Name, Npc, PendingMove, PendingReply, Player, Position},
-    map::{Tile, TileMap},
+    map::{PropKind, Tile, TileMap},
     resources::{GameLog, PLAYER_VIEW_RADIUS, PlayerNeeds, UiMode, UiState, WorldClock},
     runtime::RigRuntime,
 };
@@ -59,13 +59,13 @@ pub fn draw_system(
 
     context.draw(|frame| {
         let area = frame.area();
-        let bottom_height = if ui.mode == UiMode::Talking { 13 } else { 12 };
+        let bottom_height = if ui.mode == UiMode::Talking { 16 } else { 15 };
         let vertical = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(12), Constraint::Length(bottom_height)])
             .split(area);
 
-        let town_block = Block::default().borders(Borders::ALL).title("Town");
+        let town_block = Block::default().borders(Borders::ALL).title("Tavern Floor");
         let town_inner = town_block.inner(vertical[0]);
         let viewport = build_camera_viewport(&map, *player_pos, town_inner);
         let actor_map = build_actor_map(
@@ -105,7 +105,7 @@ pub fn draw_system(
             .split(bottom_inner);
         let right = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(7), Constraint::Min(5)])
+            .constraints([Constraint::Length(8), Constraint::Min(6)])
             .split(columns[2]);
 
         frame.render_widget(
@@ -163,21 +163,16 @@ pub fn draw_system(
     Ok(())
 }
 
-fn build_camera_viewport(map: &TileMap, player_pos: Position, area: Rect) -> CameraViewport {
+fn build_camera_viewport(_map: &TileMap, player_pos: Position, area: Rect) -> CameraViewport {
     let width = i32::from(area.width.max(1));
     let height = i32::from(area.height.max(1));
-    let clamped_width = width.min(map.width.max(1));
-    let clamped_height = height.min(map.height.max(1));
-    let max_x = (map.width - clamped_width).max(0);
-    let max_y = (map.height - clamped_height).max(0);
-
-    let origin_x = (player_pos.x - clamped_width / 2).clamp(0, max_x);
-    let origin_y = (player_pos.y - clamped_height / 2).clamp(0, max_y);
+    let origin_x = player_pos.x - width / 2;
+    let origin_y = player_pos.y - height / 2;
 
     CameraViewport {
         origin: Position::new(origin_x, origin_y),
-        width: clamped_width,
-        height: clamped_height,
+        width,
+        height,
     }
 }
 
@@ -250,7 +245,7 @@ fn build_map_lines(
         let mut spans = Vec::with_capacity(viewport.width as usize);
         for x in viewport.origin.x..(viewport.origin.x + viewport.width) {
             let pos = Position::new(x, y);
-            if !visible_tiles.contains(&pos) {
+            if !map.in_bounds(x, y) {
                 spans.push(Span::raw(" "));
                 continue;
             }
@@ -260,21 +255,22 @@ fn build_map_lines(
                 continue;
             }
 
+            let visible = visible_tiles.contains(&pos);
+            let (glyph, mut style) = if let Some(prop) = map.prop(x, y) {
+                (prop.glyph(), prop_style(prop, visible))
+            } else {
+                let tile = map.tile(x, y);
+                (tile.glyph(), tile_style(tile, visible))
+            };
+
             if pos == cursor {
-                spans.push(Span::styled(
-                    "x",
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                ));
-                continue;
+                style = style
+                    .bg(Color::Yellow)
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::BOLD);
             }
 
-            match map.tile(x, y) {
-                Tile::Floor => spans.push(Span::styled(".", Style::default().fg(Color::DarkGray))),
-                Tile::Wall => spans.push(Span::styled("#", Style::default().fg(Color::Gray))),
-            }
+            spans.push(Span::styled(glyph.to_string(), style));
         }
         lines.push(Line::from(spans));
     }
@@ -345,7 +341,7 @@ fn build_status_input_panel(
             ui.cursor.y,
             selected_name(ui.selected_npc, npc_query)
         )),
-        Line::from("move=WASD/arrows  cursor=IJKL  talk=T/Enter"),
+        Line::from("move=WASD/arrows  cursor=IJKL  interact=E  talk=T/Enter"),
         Line::from("cursor center=C  provider=[ ]  focus=Tab  wait=Space  quit=Q/Esc"),
     ];
 
@@ -423,41 +419,52 @@ fn build_cursor_panel(
     }
 
     let visible = visible_tiles.contains(&cursor);
+    let tile = map.tile(cursor.x, cursor.y);
+    let prop = map.prop(cursor.x, cursor.y);
     lines.push(Line::from(format!(
         "Visible: {}",
         if visible { "yes" } else { "no" }
     )));
-
-    if visible {
-        lines.push(Line::from(format!(
-            "Ground: {}",
-            tile_label(map.tile(cursor.x, cursor.y))
-        )));
-        lines.push(Line::from(format!(
-            "Actor: {}",
-            actor_at(cursor, player_query, npc_query).unwrap_or_else(|| "none".to_string())
-        )));
-        lines.push(Line::from("Object: none"));
-
-        if let Some(entity) = npc_query
-            .iter()
-            .find(|(_, pos, _, _, _, _, _, _)| **pos == cursor)
-            .map(|(entity, ..)| entity)
-            && let Ok((_, _, _, _, memory, move_plan, pending_move, pending_reply)) =
-                npc_query.get(entity)
-        {
-            lines.push(Line::from(format!(
-                "State: {}",
-                movement_status(move_plan, *pending_move, *pending_reply)
-            )));
-            if !memory.notes.is_empty() {
-                lines.push(Line::from(format!("Notes: {}", memory.notes.join(" | "))));
+    lines.push(Line::from(format!("Ground: {}", tile.label())));
+    lines.push(Line::from(tile.description()));
+    lines.push(Line::from(format!(
+        "Actor: {}",
+        actor_at(cursor, player_query, npc_query).unwrap_or_else(|| {
+            if visible {
+                "none".to_string()
+            } else {
+                "unseen".to_string()
             }
+        })
+    )));
+    lines.push(Line::from(format!(
+        "Object: {}",
+        prop.map(PropKind::label).unwrap_or("none")
+    )));
+
+    if let Some(prop) = prop {
+        lines.push(Line::from(prop.description()));
+        lines.push(Line::from(if player_pos.chebyshev_distance(cursor) <= 1 {
+            "Press E to interact."
+        } else {
+            "Move closer or inspect from afar."
+        }));
+    }
+
+    if let Some(entity) = npc_query
+        .iter()
+        .find(|(_, pos, _, _, _, _, _, _)| **pos == cursor)
+        .map(|(entity, ..)| entity)
+        && let Ok((_, _, _, _, memory, move_plan, pending_move, pending_reply)) =
+            npc_query.get(entity)
+    {
+        lines.push(Line::from(format!(
+            "State: {}",
+            movement_status(move_plan, *pending_move, *pending_reply)
+        )));
+        if !memory.notes.is_empty() {
+            lines.push(Line::from(format!("Notes: {}", memory.notes.join(" | "))));
         }
-    } else {
-        lines.push(Line::from("Ground: unknown"));
-        lines.push(Line::from("Actor: unseen"));
-        lines.push(Line::from("Object: unknown"));
     }
 
     Text::from(lines)
@@ -480,10 +487,32 @@ fn actor_at(
         .map(|(_, _, _, name, _, _, _, _)| name.0.clone())
 }
 
-fn tile_label(tile: Tile) -> &'static str {
-    match tile {
-        Tile::Floor => "floorboards",
-        Tile::Wall => "wall",
+fn tile_style(tile: Tile, visible: bool) -> Style {
+    match (tile, visible) {
+        (Tile::Floor, true) => Style::default().fg(Color::Rgb(123, 102, 75)),
+        (Tile::Floor, false) => Style::default().fg(Color::Rgb(48, 40, 31)),
+        (Tile::Wall, true) => Style::default().fg(Color::Rgb(160, 141, 110)),
+        (Tile::Wall, false) => Style::default().fg(Color::Rgb(62, 57, 44)),
+    }
+}
+
+fn prop_style(prop: PropKind, visible: bool) -> Style {
+    let base = match prop {
+        PropKind::BarCounter => Color::Rgb(153, 108, 63),
+        PropKind::Table => Color::Rgb(168, 134, 88),
+        PropKind::Chair | PropKind::Stool => Color::Rgb(153, 117, 76),
+        PropKind::Barrel | PropKind::Crate => Color::Rgb(131, 98, 62),
+        PropKind::Bottle => Color::Rgb(82, 135, 98),
+        PropKind::Mug => Color::Rgb(191, 179, 129),
+        PropKind::Candle => Color::Rgb(255, 210, 110),
+        PropKind::Shelf => Color::Rgb(148, 122, 94),
+        PropKind::Piano => Color::Rgb(181, 181, 181),
+    };
+
+    if visible {
+        Style::default().fg(base).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Rgb(54, 47, 39))
     }
 }
 

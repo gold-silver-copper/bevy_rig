@@ -9,7 +9,7 @@ use crate::{
 };
 
 pub fn setup_world(mut commands: Commands, mut ui: ResMut<UiState>) {
-    let player_start = Position::new(8, 11);
+    let player_start = Position::new(42, 22);
     commands.spawn((Player, Name("Ranger".into()), Glyph('@'), player_start));
 
     let bartender = commands
@@ -17,7 +17,7 @@ pub fn setup_world(mut commands: Commands, mut ui: ResMut<UiState>) {
             Npc,
             Name("Maeve the Bartender".into()),
             Glyph('B'),
-            Position::new(12, 10),
+            Position::new(20, 9),
             Memory {
                 notes: vec![
                     "Runs the saloon and knows most local gossip.".into(),
@@ -30,10 +30,10 @@ pub fn setup_world(mut commands: Commands, mut ui: ResMut<UiState>) {
                 preferred_model: None,
             },
             Wanderer {
-                home: Position::new(12, 10),
+                home: Position::new(20, 9),
                 next_direction: 0,
-                radius: 2,
-                vision_radius: 5,
+                radius: 3,
+                vision_radius: 7,
             },
             NpcPace::new(1.4, 0.28, 0.15),
             PendingMove::default(),
@@ -46,7 +46,7 @@ pub fn setup_world(mut commands: Commands, mut ui: ResMut<UiState>) {
         Npc,
         Name("Sheriff Holt".into()),
         Glyph('S'),
-        Position::new(26, 8),
+        Position::new(50, 21),
         Memory {
             notes: vec![
                 "Keeps watch over the main street.".into(),
@@ -59,10 +59,10 @@ pub fn setup_world(mut commands: Commands, mut ui: ResMut<UiState>) {
             preferred_model: None,
         },
         Wanderer {
-            home: Position::new(26, 8),
+            home: Position::new(50, 21),
             next_direction: 1,
-            radius: 4,
-            vision_radius: 7,
+            radius: 6,
+            vision_radius: 9,
         },
         NpcPace::new(1.1, 0.22, 0.4),
         PendingMove::default(),
@@ -74,7 +74,7 @@ pub fn setup_world(mut commands: Commands, mut ui: ResMut<UiState>) {
         Npc,
         Name("Juniper the Drifter".into()),
         Glyph('D'),
-        Position::new(41, 15),
+        Position::new(34, 28),
         Memory {
             notes: vec![
                 "A drifter passing through town looking for work.".into(),
@@ -87,10 +87,10 @@ pub fn setup_world(mut commands: Commands, mut ui: ResMut<UiState>) {
             preferred_model: None,
         },
         Wanderer {
-            home: Position::new(41, 15),
+            home: Position::new(34, 28),
             next_direction: 2,
-            radius: 5,
-            vision_radius: 7,
+            radius: 7,
+            vision_radius: 9,
         },
         NpcPace::new(0.9, 0.18, 0.65),
         PendingMove::default(),

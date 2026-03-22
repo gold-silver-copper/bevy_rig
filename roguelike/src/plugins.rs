@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 
 use crate::{
-    events::{MoveIntent, TalkIntent},
+    events::{InteractIntent, MoveIntent, TalkIntent},
     map::TileMap,
     resources::{GameLog, PlayerNeeds, UiState, WorldClock},
     runtime::RigRuntime,
@@ -14,6 +14,7 @@ impl Plugin for RoguelikePlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<MoveIntent>()
             .add_message::<TalkIntent>()
+            .add_message::<InteractIntent>()
             .insert_resource(TileMap::demo())
             .insert_resource(UiState::default())
             .insert_resource(GameLog::default())
@@ -27,6 +28,7 @@ impl Plugin for RoguelikePlugin {
                 (
                     simulation::advance_frame_system,
                     simulation::update_player_needs_system,
+                    simulation::interact_with_cursor_system,
                     simulation::start_talk_system,
                     simulation::request_npc_move_plans_system,
                     simulation::advance_npc_move_plans_system,

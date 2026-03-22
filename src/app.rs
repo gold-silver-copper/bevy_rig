@@ -1,144 +1,126 @@
-use bevy::prelude::*;
-use bevy_egui::EguiPrimaryContextPass;
-
-use crate::{
-    catalog::build_registry,
-    domain::{ChatState, ProviderRegistry},
-    runtime::{RuntimeBridge, RuntimeEvent},
-    ui::{configure_egui, render_chat_ui},
+use bevy_app::{App, MainScheduleOrder, Plugin, Update};
+use bevy_ecs::{
+    prelude::*,
+    schedule::{IntoScheduleConfigs, Schedule, ScheduleLabel},
 };
 
-pub struct RigStudioPlugin;
+use crate::{
+    context::{self, ContextIndex},
+    diagnostics::{self, RuntimeDiagnostics},
+    model::ModelRegistry,
+    provider::ProviderRegistry,
+    run::{self, CancelRun, RunAgent, RunCommitted, RunFailed, StreamCompleted, TextDelta},
+    tool::{self, ToolCallCompleted, ToolCallFailed, ToolCallRequested, ToolRegistry},
+    workflow::{self, RunWorkflow, WorkflowCommitted, WorkflowFailed},
+};
 
-impl Plugin for RigStudioPlugin {
+#[derive(ScheduleLabel, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct CatalogSync;
+
+#[derive(ScheduleLabel, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct RunPreparation;
+
+#[derive(ScheduleLabel, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct RunExecution;
+
+#[derive(ScheduleLabel, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct RunCommit;
+
+#[derive(ScheduleLabel, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Telemetry;
+
+#[derive(SystemSet, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct RunPreparationSystems;
+
+#[derive(SystemSet, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct RunExecutionSystems;
+
+#[derive(SystemSet, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ToolDispatchSystems;
+
+#[derive(SystemSet, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct StreamApplySystems;
+
+#[derive(SystemSet, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct RunCommitSystems;
+
+#[derive(Default)]
+pub struct BevyRigPlugin;
+
+impl Plugin for BevyRigPlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(RuntimeBridge::new())
-            .insert_resource(build_registry())
-            .init_resource::<ChatState>()
-            .add_systems(Startup, setup_camera)
-            .add_systems(Startup, initialize_chat_state.after(setup_camera))
-            .add_systems(Update, refresh_provider_statuses)
-            .add_systems(Update, poll_runtime_events)
+        app.init_resource::<ToolRegistry>()
+            .init_resource::<ProviderRegistry>()
+            .init_resource::<ModelRegistry>()
+            .init_resource::<ContextIndex>()
+            .init_resource::<RuntimeDiagnostics>()
+            .add_message::<RunAgent>()
+            .add_message::<CancelRun>()
+            .add_message::<RunCommitted>()
+            .add_message::<RunFailed>()
+            .add_message::<RunWorkflow>()
+            .add_message::<WorkflowCommitted>()
+            .add_message::<WorkflowFailed>()
+            .add_message::<ToolCallRequested>()
+            .add_message::<ToolCallCompleted>()
+            .add_message::<ToolCallFailed>()
+            .add_message::<TextDelta>()
+            .add_message::<StreamCompleted>()
+            .add_schedule(Schedule::new(CatalogSync))
+            .add_schedule(Schedule::new(RunPreparation))
+            .add_schedule(Schedule::new(RunExecution))
+            .add_schedule(Schedule::new(RunCommit))
+            .add_schedule(Schedule::new(Telemetry))
+            .configure_sets(RunPreparation, RunPreparationSystems)
+            .configure_sets(
+                RunExecution,
+                (RunExecutionSystems, ToolDispatchSystems, StreamApplySystems).chain(),
+            )
+            .configure_sets(RunCommit, RunCommitSystems)
+            .add_systems(CatalogSync, context::rebuild_context_index)
             .add_systems(
-                EguiPrimaryContextPass,
-                (configure_egui, render_chat_ui).chain(),
-            );
-    }
-}
+                RunPreparation,
+                (
+                    run::capture_run_requests,
+                    workflow::capture_workflow_requests,
+                    run::cancel_runs,
+                    run::assemble_run_prompts,
+                )
+                    .chain()
+                    .in_set(RunPreparationSystems),
+            )
+            .add_systems(
+                RunExecution,
+                workflow::execute_workflow_invocations.in_set(RunExecutionSystems),
+            )
+            .add_systems(
+                RunExecution,
+                tool::dispatch_requested_tool_calls.in_set(ToolDispatchSystems),
+            )
+            .add_systems(
+                RunExecution,
+                (run::apply_text_deltas, run::finish_streams)
+                    .chain()
+                    .in_set(StreamApplySystems),
+            )
+            .add_systems(
+                RunCommit,
+                (
+                    run::persist_completed_runs,
+                    run::persist_failed_runs,
+                    run::persist_cancelled_runs,
+                    workflow::persist_completed_workflows,
+                    workflow::persist_failed_workflows,
+                )
+                    .in_set(RunCommitSystems),
+            )
+            .add_systems(Telemetry, diagnostics::refresh_runtime_diagnostics);
 
-fn setup_camera(mut commands: Commands) {
-    commands.spawn(Camera2d);
-}
-
-fn initialize_chat_state(mut chat: ResMut<ChatState>, registry: Res<ProviderRegistry>) {
-    chat.selected_provider = registry
-        .providers
-        .iter()
-        .find(|provider| provider.ready)
-        .or_else(|| registry.providers.first())
-        .map(|provider| provider.kind);
-
-    if let Some(provider) = selected_provider(&registry, &chat) {
-        if provider.ready {
-            chat.status = Some(format!(
-                "Ready on {} / {}.",
-                provider.label, provider.default_model
-            ));
-            chat.push_log(format!(
-                "Selected ready provider {} / {} at startup.",
-                provider.label, provider.default_model
-            ));
-        } else {
-            chat.status = Some(format!(
-                "No ready provider detected. Currently inspecting {}.",
-                provider.label
-            ));
-            chat.push_log(
-                "No ready provider detected at startup. Start a local backend or provide an API key.",
-            );
-        }
-    }
-}
-
-fn refresh_provider_statuses(
-    time: Res<Time>,
-    mut timer: Local<Option<Timer>>,
-    mut registry: ResMut<ProviderRegistry>,
-    mut chat: ResMut<ChatState>,
-) {
-    let timer = timer.get_or_insert_with(|| Timer::from_seconds(1.0, TimerMode::Repeating));
-    if !timer.tick(time.delta()).just_finished() {
-        return;
-    }
-
-    let mut changed = false;
-    for provider in &mut registry.providers {
-        let ready = crate::catalog::provider_ready(provider.kind);
-        if provider.ready != ready {
-            provider.ready = ready;
-            changed = true;
-        }
-    }
-
-    if changed
-        && chat.history.is_empty()
-        && !chat.sending
-        && selected_provider(&registry, &chat).is_none_or(|provider| !provider.ready)
-        && let Some(provider) = registry.providers.iter().find(|provider| provider.ready)
-    {
-        chat.selected_provider = Some(provider.kind);
-        chat.status = Some(format!(
-            "Switched to ready provider {} / {}.",
-            provider.label, provider.default_model
-        ));
-        chat.push_log(format!(
-            "Auto-selected ready provider {} / {}.",
-            provider.label, provider.default_model
-        ));
-    }
-}
-
-fn poll_runtime_events(runtime: Res<RuntimeBridge>, mut chat: ResMut<ChatState>) {
-    for event in runtime.receiver().try_iter() {
-        match event {
-            RuntimeEvent::ChatFinished(result) => {
-                chat.sending = false;
-                match result {
-                    Ok(response) => {
-                        chat.history.push(crate::domain::ChatMessage {
-                            role: crate::domain::ChatRole::Assistant,
-                            content: response,
-                        });
-                        chat.status = Some("Assistant replied.".to_string());
-                        chat.push_log("Received assistant response.");
-                    }
-                    Err(error) => {
-                        chat.status = Some(format!("Runtime error: {error}"));
-                        chat.push_log(format!("Runtime error: {error}"));
-                    }
-                }
-            }
-        }
-    }
-}
-
-pub fn selected_provider<'a>(
-    registry: &'a ProviderRegistry,
-    chat: &ChatState,
-) -> Option<&'a crate::domain::ProviderEntry> {
-    let kind = chat.selected_provider?;
-    registry
-        .providers
-        .iter()
-        .find(|provider| provider.kind == kind)
-}
-
-pub fn provider_state_label(provider: &crate::domain::ProviderEntry) -> &'static str {
-    if provider.ready {
-        "ready"
-    } else if provider.is_local {
-        "offline"
-    } else {
-        "missing env"
+        let mut order = app.world_mut().resource_mut::<MainScheduleOrder>();
+        order.insert_after(Update, CatalogSync);
+        order.insert_after(CatalogSync, RunPreparation);
+        order.insert_after(RunPreparation, RunExecution);
+        order.insert_after(RunExecution, RunCommit);
+        order.insert_after(RunCommit, Telemetry);
     }
 }

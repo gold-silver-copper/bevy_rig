@@ -4,7 +4,7 @@ use bevy::prelude::*;
 
 use crate::components::Position;
 
-pub const PLAYER_VIEW_RADIUS: i32 = 12;
+pub const PLAYER_VIEW_RADIUS: i32 = 18;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UiMode {

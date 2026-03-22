@@ -13,22 +13,186 @@ pub enum Tile {
     Wall,
 }
 
+impl Tile {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Floor => "floorboards",
+            Self::Wall => "timber wall",
+        }
+    }
+
+    pub fn glyph(self) -> char {
+        match self {
+            Self::Floor => '.',
+            Self::Wall => '#',
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Floor => "Scuffed tavern floorboards stained by years of boots and spilled ale.",
+            Self::Wall => "A thick timber wall lined with plaster and old lantern soot.",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PropKind {
+    BarCounter,
+    Table,
+    Chair,
+    Stool,
+    Barrel,
+    Crate,
+    Bottle,
+    Mug,
+    Candle,
+    Shelf,
+    Piano,
+}
+
+impl PropKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::BarCounter => "bar counter",
+            Self::Table => "table",
+            Self::Chair => "chair",
+            Self::Stool => "stool",
+            Self::Barrel => "barrel",
+            Self::Crate => "crate",
+            Self::Bottle => "bottle",
+            Self::Mug => "mug",
+            Self::Candle => "candle",
+            Self::Shelf => "shelf",
+            Self::Piano => "piano",
+        }
+    }
+
+    pub fn glyph(self) -> char {
+        match self {
+            Self::BarCounter => '=',
+            Self::Table => 'T',
+            Self::Chair => 'h',
+            Self::Stool => 'u',
+            Self::Barrel => '0',
+            Self::Crate => 'B',
+            Self::Bottle => '!',
+            Self::Mug => 'u',
+            Self::Candle => '\'',
+            Self::Shelf => '#',
+            Self::Piano => 'P',
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::BarCounter => "A polished bar counter worn smooth by elbows and spilled ale.",
+            Self::Table => "A sturdy tavern table ready for cards, gossip, or another round.",
+            Self::Chair => "A creaking wooden chair.",
+            Self::Stool => "A low stool parked near the bar.",
+            Self::Barrel => "A cask that smells faintly of beer and oak.",
+            Self::Crate => "A supply crate full of kitchen odds and ends.",
+            Self::Bottle => "A bottle of house spirits.",
+            Self::Mug => "A mug waiting for a refill.",
+            Self::Candle => "A candle throwing warm amber light.",
+            Self::Shelf => "A shelf lined with spare cups and bottles.",
+            Self::Piano => "An old upright piano with a few sticky keys.",
+        }
+    }
+
+    pub fn blocks_movement(self) -> bool {
+        !matches!(self, Self::Bottle | Self::Mug | Self::Candle)
+    }
+
+    pub fn blocks_sight(self) -> bool {
+        matches!(self, Self::BarCounter | Self::Shelf)
+    }
+}
+
 #[derive(Resource, Clone, Debug)]
 pub struct TileMap {
     pub width: i32,
     pub height: i32,
     tiles: Vec<Tile>,
+    props: HashMap<(i32, i32), PropKind>,
 }
 
 impl TileMap {
     pub fn demo() -> Self {
-        let mut map = Self::filled(54, 22, Tile::Floor);
-        map.paint_border();
-        map.paint_room(3, 2, 15, 7, 9, 8);
-        map.paint_room(20, 2, 15, 7, 27, 8);
-        map.paint_room(38, 2, 13, 7, 44, 8);
-        map.paint_room(8, 13, 18, 6, 17, 13);
-        map.paint_room(31, 13, 18, 6, 40, 13);
+        let mut map = Self::filled(96, 48, Tile::Wall);
+        map.carve_room(3, 3, 90, 42);
+
+        map.paint_vertical_wall(60, 4, 44);
+        map.open_vertical_door(60, 12, 2);
+        map.open_vertical_door(60, 24, 2);
+        map.open_vertical_door(60, 36, 2);
+
+        map.paint_vertical_wall(75, 4, 44);
+        map.open_vertical_door(75, 18, 2);
+        map.open_vertical_door(75, 34, 2);
+
+        map.paint_horizontal_wall(14, 61, 91);
+        map.open_horizontal_door(14, 68, 2);
+        map.open_horizontal_door(14, 84, 2);
+
+        map.paint_horizontal_wall(30, 76, 91);
+        map.open_horizontal_door(30, 84, 2);
+
+        map.set(46, 44, Tile::Floor);
+        map.set(47, 44, Tile::Floor);
+        map.set(48, 44, Tile::Floor);
+
+        for x in 12..=28 {
+            map.set_prop(x, 10, PropKind::BarCounter);
+        }
+        for x in [13, 16, 19, 22, 25, 28] {
+            map.set_prop(x, 11, PropKind::Stool);
+        }
+        for x in 13..=27 {
+            if x % 2 == 1 {
+                map.set_prop(x, 7, PropKind::Shelf);
+            }
+        }
+        for x in [14, 18, 22, 26] {
+            map.set_prop(x, 8, PropKind::Bottle);
+            map.set_prop(x + 1, 8, PropKind::Mug);
+        }
+
+        map.place_table_set(18, 20);
+        map.place_table_set(26, 28);
+        map.place_table_set(38, 18);
+        map.place_table_set(46, 26);
+        map.place_table_set(52, 14);
+        map.set_prop(50, 8, PropKind::Piano);
+        map.set_prop(52, 8, PropKind::Candle);
+
+        for (x, y) in [(64, 8), (66, 8), (70, 8), (72, 8)] {
+            map.set_prop(x, y, PropKind::Barrel);
+        }
+        for (x, y) in [(64, 11), (67, 11), (71, 11)] {
+            map.set_prop(x, y, PropKind::Crate);
+        }
+        map.set_prop(69, 6, PropKind::Shelf);
+        map.set_prop(70, 6, PropKind::Bottle);
+        map.set_prop(71, 6, PropKind::Bottle);
+
+        map.place_table_set(82, 9);
+        map.place_table_set(86, 12);
+        map.place_table_set(82, 22);
+        map.place_table_set(87, 25);
+        map.place_table_set(82, 36);
+        map.place_table_set(87, 39);
+
+        for (x, y) in [(65, 21), (69, 21), (72, 21), (65, 26), (70, 27)] {
+            map.set_prop(x, y, PropKind::Barrel);
+        }
+        for (x, y) in [(66, 33), (70, 35), (72, 37)] {
+            map.set_prop(x, y, PropKind::Crate);
+        }
+        for (x, y) in [(78, 6), (88, 6), (78, 32), (88, 32)] {
+            map.set_prop(x, y, PropKind::Candle);
+        }
+
         map
     }
 
@@ -37,30 +201,49 @@ impl TileMap {
             width,
             height,
             tiles: vec![tile; (width * height) as usize],
+            props: HashMap::new(),
         }
     }
 
-    fn paint_border(&mut self) {
-        for x in 0..self.width {
-            self.set(x, 0, Tile::Wall);
-            self.set(x, self.height - 1, Tile::Wall);
-        }
-        for y in 0..self.height {
-            self.set(0, y, Tile::Wall);
-            self.set(self.width - 1, y, Tile::Wall);
-        }
-    }
-
-    fn paint_room(&mut self, x: i32, y: i32, w: i32, h: i32, door_x: i32, door_y: i32) {
+    fn carve_room(&mut self, x: i32, y: i32, w: i32, h: i32) {
         for yy in y..(y + h) {
             for xx in x..(x + w) {
                 let is_edge = xx == x || yy == y || xx == x + w - 1 || yy == y + h - 1;
-                if is_edge {
-                    self.set(xx, yy, Tile::Wall);
-                }
+                self.set(xx, yy, if is_edge { Tile::Wall } else { Tile::Floor });
             }
         }
-        self.set(door_x, door_y, Tile::Floor);
+    }
+
+    fn paint_vertical_wall(&mut self, x: i32, y0: i32, y1: i32) {
+        for y in y0..=y1 {
+            self.set(x, y, Tile::Wall);
+        }
+    }
+
+    fn paint_horizontal_wall(&mut self, y: i32, x0: i32, x1: i32) {
+        for x in x0..=x1 {
+            self.set(x, y, Tile::Wall);
+        }
+    }
+
+    fn open_vertical_door(&mut self, x: i32, y: i32, height: i32) {
+        for yy in y..(y + height) {
+            self.set(x, yy, Tile::Floor);
+        }
+    }
+
+    fn open_horizontal_door(&mut self, y: i32, x: i32, width: i32) {
+        for xx in x..(x + width) {
+            self.set(xx, y, Tile::Floor);
+        }
+    }
+
+    fn place_table_set(&mut self, x: i32, y: i32) {
+        self.set_prop(x, y, PropKind::Table);
+        self.set_prop(x - 1, y, PropKind::Chair);
+        self.set_prop(x + 1, y, PropKind::Chair);
+        self.set_prop(x, y - 1, PropKind::Mug);
+        self.set_prop(x, y + 1, PropKind::Bottle);
     }
 
     pub fn tile(&self, x: i32, y: i32) -> Tile {
@@ -76,16 +259,34 @@ impl TileMap {
         }
     }
 
+    pub fn set_prop(&mut self, x: i32, y: i32, prop: PropKind) {
+        if self.in_bounds(x, y) {
+            self.props.insert((x, y), prop);
+        }
+    }
+
+    pub fn prop(&self, x: i32, y: i32) -> Option<PropKind> {
+        self.props.get(&(x, y)).copied()
+    }
+
     pub fn in_bounds(&self, x: i32, y: i32) -> bool {
         x >= 0 && y >= 0 && x < self.width && y < self.height
     }
 
     pub fn is_walkable(&self, pos: Position) -> bool {
-        self.in_bounds(pos.x, pos.y) && self.tile(pos.x, pos.y) == Tile::Floor
+        self.in_bounds(pos.x, pos.y)
+            && self.tile(pos.x, pos.y) == Tile::Floor
+            && !self
+                .prop(pos.x, pos.y)
+                .is_some_and(|prop| prop.blocks_movement())
     }
 
     pub fn blocks_sight(&self, pos: Position) -> bool {
-        !self.in_bounds(pos.x, pos.y) || self.tile(pos.x, pos.y) == Tile::Wall
+        !self.in_bounds(pos.x, pos.y)
+            || self.tile(pos.x, pos.y) == Tile::Wall
+            || self
+                .prop(pos.x, pos.y)
+                .is_some_and(|prop| prop.blocks_sight())
     }
 
     pub fn visible_tiles(&self, origin: Position, radius: i32) -> HashSet<Position> {

@@ -7,9 +7,9 @@ use crate::{
         Memory, MovePlan, Name, Npc, NpcPace, PendingMove, PendingReply, Player, Position,
         RigPersona, Speaker, Wanderer,
     },
-    events::{MoveIntent, TalkIntent},
-    map::{Tile, TileMap},
-    resources::{GameLog, PlayerNeeds, UiMode, UiState, WorldClock},
+    events::{InteractIntent, MoveIntent, TalkIntent},
+    map::{PropKind, TileMap},
+    resources::{GameLog, PLAYER_VIEW_RADIUS, PlayerNeeds, UiMode, UiState, WorldClock},
     runtime::{MovementCandidate, RigResponse, RigRuntime, RuntimeMessage},
 };
 
@@ -26,6 +26,75 @@ pub fn update_player_needs_system(time: Res<Time>, mut needs: ResMut<PlayerNeeds
     let dt = time.delta_secs();
     needs.hunger = (needs.hunger - dt * 0.35).clamp(0.0, 100.0);
     needs.thirst = (needs.thirst - dt * 0.55).clamp(0.0, 100.0);
+}
+
+pub fn interact_with_cursor_system(
+    mut intents: MessageReader<InteractIntent>,
+    map: Res<TileMap>,
+    mut needs: ResMut<PlayerNeeds>,
+    player_query: Query<&Position, With<Player>>,
+    npc_query: Query<(&Position, &Name), With<Npc>>,
+    mut log: ResMut<GameLog>,
+) {
+    let Ok(player_pos) = player_query.single() else {
+        return;
+    };
+    let visible_tiles = map.visible_tiles(*player_pos, PLAYER_VIEW_RADIUS);
+
+    for intent in intents.read() {
+        let target = intent.position;
+        if !map.in_bounds(target.x, target.y) {
+            log.push("There is nothing there beyond the tavern walls.");
+            continue;
+        }
+
+        if !visible_tiles.contains(&target) {
+            log.push("You cannot make that out clearly from here.");
+            continue;
+        }
+
+        if target == *player_pos {
+            log.push("You pat your coat, check your footing, and keep your balance.");
+            continue;
+        }
+
+        if let Some((_, name)) = npc_query.iter().find(|(pos, _)| **pos == target) {
+            log.push(format!(
+                "{} is there. Speak aloud with T or Enter if you want the room to hear you.",
+                name.0
+            ));
+            continue;
+        }
+
+        let distance = player_pos.chebyshev_distance(target);
+        if let Some(prop) = map.prop(target.x, target.y) {
+            if distance > 1 {
+                log.push(format!(
+                    "You study the {} from across the room. {}",
+                    prop.label(),
+                    prop.description()
+                ));
+                continue;
+            }
+
+            let (message, hunger_delta, thirst_delta) = interact_with_prop(prop);
+            needs.hunger = (needs.hunger + hunger_delta).clamp(0.0, 100.0);
+            needs.thirst = (needs.thirst + thirst_delta).clamp(0.0, 100.0);
+            log.push(message);
+            continue;
+        }
+
+        let tile = map.tile(target.x, target.y);
+        if distance > 1 {
+            log.push(format!("You look over the {}.", tile.label()));
+        } else {
+            log.push(format!(
+                "You tap the {} with your boot. {}",
+                tile.label(),
+                tile.description()
+            ));
+        }
+    }
 }
 
 pub fn request_npc_move_plans_system(
@@ -178,10 +247,12 @@ pub fn resolve_move_intents_system(
     mut intents: MessageReader<MoveIntent>,
     map: Res<TileMap>,
     mut clock: ResMut<WorldClock>,
+    ui: Option<ResMut<UiState>>,
     player_entities: Query<(), With<Player>>,
     mut npc_move_plans: Query<&mut MovePlan, With<Npc>>,
     mut positions: Query<(Entity, &mut Position, Option<&Name>), Or<(With<Player>, With<Npc>)>>,
 ) {
+    let mut ui = ui;
     let mut current_positions = HashMap::new();
     let mut occupied = HashMap::new();
 
@@ -221,7 +292,14 @@ pub fn resolve_move_intents_system(
             current_positions.insert(intent.entity, next);
             *pos = next;
             clock.turn += 1;
-            let _ = player_entities.get(intent.entity);
+            if player_entities.get(intent.entity).is_ok() {
+                if let Some(ui) = ui.as_deref_mut() {
+                    ui.cursor = Position::new(
+                        (ui.cursor.x + intent.dx).clamp(0, map.width - 1),
+                        (ui.cursor.y + intent.dy).clamp(0, map.height - 1),
+                    );
+                }
+            }
             let _ = maybe_name;
         }
     }
@@ -461,6 +539,66 @@ fn build_movement_system_prompt(name: &Name, persona: &RigPersona, memory: &Memo
     )
 }
 
+fn interact_with_prop(prop: PropKind) -> (&'static str, f32, f32) {
+    match prop {
+        PropKind::BarCounter => (
+            "You lean on the bar counter and catch the smell of oak, lemon oil, and old whiskey.",
+            0.0,
+            0.0,
+        ),
+        PropKind::Table => (
+            "You rap your knuckles on the table and scan the tavern room.",
+            0.0,
+            0.0,
+        ),
+        PropKind::Chair => (
+            "You pull out the chair, take a short breather, and stand again.",
+            0.0,
+            0.0,
+        ),
+        PropKind::Stool => (
+            "You perch on the stool for a moment and take in the room.",
+            0.0,
+            0.0,
+        ),
+        PropKind::Barrel => (
+            "You knock on the barrel and hear beer slosh against the staves.",
+            0.0,
+            6.0,
+        ),
+        PropKind::Crate => (
+            "You peek into the crate and find towels, candles, and kitchen odds and ends.",
+            0.0,
+            0.0,
+        ),
+        PropKind::Bottle => (
+            "You take a steady pull from the bottle. It burns, but it settles the dust in your throat.",
+            0.0,
+            18.0,
+        ),
+        PropKind::Mug => (
+            "You drain half the mug and feel a little less parched.",
+            0.0,
+            12.0,
+        ),
+        PropKind::Candle => (
+            "You cup a hand near the candle and watch the flame wobble in the draft.",
+            0.0,
+            0.0,
+        ),
+        PropKind::Shelf => (
+            "You scan the shelf of cups and bottles, taking stock of the tavern's supplies.",
+            0.0,
+            0.0,
+        ),
+        PropKind::Piano => (
+            "You tap out a crooked saloon chord on the piano before the note dies away.",
+            0.0,
+            0.0,
+        ),
+    }
+}
+
 fn format_memory_notes(memory: &Memory) -> String {
     if memory.notes.is_empty() {
         String::new()
@@ -487,6 +625,7 @@ fn build_move_context(
     occupied: &HashMap<(i32, i32), String>,
 ) -> (String, Vec<MovementCandidate>) {
     let mut visible_people = Vec::new();
+    let mut visible_fixtures = Vec::new();
     let mut candidates = Vec::new();
     let visible_set = map.visible_tiles(origin, wanderer.vision_radius);
     let player_visible = visible_set.contains(&player);
@@ -495,10 +634,21 @@ fn build_move_context(
 
     for pos in visible_tiles {
         let tile = map.tile(pos.x, pos.y);
+        let prop = map.prop(pos.x, pos.y);
         let occupied_by = occupied.get(&(pos.x, pos.y)).cloned();
-        let walkable = tile == Tile::Floor;
+        let walkable = map.is_walkable(pos);
         let inside_roam = pos.chebyshev_distance(wanderer.home) <= wanderer.radius;
         let candidate = walkable && inside_roam && (occupied_by.is_none() || pos == origin);
+
+        if let Some(prop) = prop {
+            visible_fixtures.push(format!(
+                "{}@({}, {}) dist_self={}",
+                prop.label(),
+                pos.x,
+                pos.y,
+                origin.chebyshev_distance(pos)
+            ));
+        }
 
         if let Some(occupant) = occupied_by.as_deref()
             && pos != origin
@@ -519,9 +669,11 @@ fn build_move_context(
                 id,
                 position: pos,
                 metadata: format!(
-                    "tile=({}, {}) dist_self={} dist_player={} dist_home={} current={} home={} occupied_by={}",
+                    "tile=({}, {}) ground={} prop={} dist_self={} dist_player={} dist_home={} current={} home={} occupied_by={}",
                     pos.x,
                     pos.y,
+                    tile.label(),
+                    prop.map(PropKind::label).unwrap_or("none"),
                     origin.chebyshev_distance(pos),
                     player.chebyshev_distance(pos),
                     wanderer.home.chebyshev_distance(pos),
@@ -560,6 +712,7 @@ fn build_move_context(
          - player_position=({}, {})\n\
          - player_visible={}\n\
          - visible_people={}\n\
+         - visible_fixtures={}\n\
          - recent_dialogue={}\n\
          - legal_candidate_count={}",
         origin.x,
@@ -575,6 +728,11 @@ fn build_move_context(
             "none".to_string()
         } else {
             visible_people.join(" | ")
+        },
+        if visible_fixtures.is_empty() {
+            "none".to_string()
+        } else {
+            visible_fixtures.join(" | ")
         },
         if last_exchange.is_empty() {
             "none".to_string()

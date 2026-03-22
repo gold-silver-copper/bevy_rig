@@ -5,7 +5,7 @@ use std::collections::HashSet;
 
 use crate::{
     components::{Name, Npc, PendingReply, Player, Position},
-    events::{MoveIntent, TalkIntent},
+    events::{InteractIntent, MoveIntent, TalkIntent},
     map::TileMap,
     resources::{PLAYER_VIEW_RADIUS, UiMode, UiState},
     runtime::RigRuntime,
@@ -21,6 +21,7 @@ pub fn input_system(
     mut runtime: ResMut<RigRuntime>,
     mut move_intents: MessageWriter<MoveIntent>,
     mut talk_intents: MessageWriter<TalkIntent>,
+    mut interact_intents: MessageWriter<InteractIntent>,
 ) {
     let Ok((player_entity, player_pos)) = player_query.single() else {
         return;
@@ -44,6 +45,7 @@ pub fn input_system(
                     &mut ui,
                     &mut runtime,
                     &mut move_intents,
+                    &mut interact_intents,
                     &mut exit,
                 ) {
                     break;
@@ -66,6 +68,7 @@ fn handle_explore_input(
     ui: &mut UiState,
     runtime: &mut RigRuntime,
     move_intents: &mut MessageWriter<MoveIntent>,
+    interact_intents: &mut MessageWriter<InteractIntent>,
     exit: &mut MessageWriter<AppExit>,
 ) -> bool {
     match key.code {
@@ -117,6 +120,12 @@ fn handle_explore_input(
         KeyCode::Enter | KeyCode::Char('t') => {
             ui.mode = UiMode::Talking;
             ui.draft.clear();
+            false
+        }
+        KeyCode::Char('e') => {
+            interact_intents.write(InteractIntent {
+                position: ui.cursor,
+            });
             false
         }
         KeyCode::Char('[') => {

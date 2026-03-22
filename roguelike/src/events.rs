@@ -1,5 +1,7 @@
 use bevy::prelude::*;
 
+use crate::components::Position;
+
 #[derive(Message, Clone, Copy, Debug)]
 pub struct MoveIntent {
     pub entity: Entity,
@@ -10,4 +12,9 @@ pub struct MoveIntent {
 #[derive(Message, Clone, Debug)]
 pub struct TalkIntent {
     pub prompt: String,
+}
+
+#[derive(Message, Clone, Copy, Debug)]
+pub struct InteractIntent {
+    pub position: Position,
 }
