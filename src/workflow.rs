@@ -1,4 +1,4 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use bevy_ecs::{
     hierarchy::{ChildOf, Children},
@@ -9,10 +9,10 @@ use serde_json::json;
 use thiserror::Error;
 
 use crate::{
-    agent::AgentSpec,
-    rig_runtime::execute_agent_prompt,
+    agent::{AgentModelRef, AgentSpec},
+    run::{RunBundle, RunCommitted, RunContextQuery, RunFailed, RunResultText},
     session::{ChatMessageBundle, ChatMessageRole, SessionBundle},
-    tool::{ToolCall, dispatch_tool},
+    tool::{ToolCall, ToolCallCompleted, ToolCallFailed, ToolCallRequested, ToolOutput},
 };
 
 #[derive(Component, Clone, Debug, Default, PartialEq, Eq)]
@@ -136,6 +136,18 @@ pub struct WorkflowRunCursor {
 pub struct WorkflowRunTrace(pub Vec<String>);
 
 #[derive(Component, Clone, Debug, PartialEq, Eq)]
+pub struct WorkflowAwaitingTool {
+    pub node: Entity,
+    pub call_id: String,
+}
+
+#[derive(Component, Clone, Debug, PartialEq, Eq)]
+pub struct WorkflowAwaitingAgent {
+    pub node: Entity,
+    pub run: Entity,
+}
+
+#[derive(Component, Clone, Debug, PartialEq, Eq)]
 pub enum WorkflowRunStatus {
     Queued,
     Running,
@@ -236,8 +248,6 @@ enum WorkflowExecutionError {
     MissingBinding(Entity),
     #[error("workflow agent node {node:?} failed: {error}")]
     AgentFailure { node: Entity, error: String },
-    #[error("workflow tool node {node:?} failed: {error}")]
-    ToolFailure { node: Entity, error: String },
 }
 
 pub fn spawn_workflow(world: &mut World, spec: WorkflowSpec) -> Entity {
@@ -425,6 +435,12 @@ pub fn execute_workflow_invocations(world: &mut World) {
         ) {
             continue;
         }
+        if world.get::<WorkflowAwaitingTool>(invocation).is_some() {
+            continue;
+        }
+        if world.get::<WorkflowAwaitingAgent>(invocation).is_some() {
+            continue;
+        }
 
         let Some(workflow) = world.get::<WorkflowRunWorkflow>(invocation).copied() else {
             insert_workflow_failure(world, invocation, "workflow invocation is missing workflow");
@@ -442,14 +458,24 @@ pub fn execute_workflow_invocations(world: &mut World) {
             .unwrap_or_default();
 
         let mut failure = None;
+        let mut awaiting_tool = None;
+        let mut awaiting_agent = None;
         while let Some(node) = remaining.pop_front() {
             match execute_workflow_node(world, workflow.0, invocation, node, &current_prompt) {
-                Ok(step) => {
+                Ok(WorkflowNodeOutcome::Continue(step)) => {
                     trace.0.push(step.trace_line);
                     current_prompt = step.next_prompt;
                     for target in step.next_nodes {
                         remaining.push_back(target);
                     }
+                }
+                Ok(WorkflowNodeOutcome::AwaitTool(waiting)) => {
+                    awaiting_tool = Some(waiting);
+                    break;
+                }
+                Ok(WorkflowNodeOutcome::AwaitAgent(waiting)) => {
+                    awaiting_agent = Some(waiting);
+                    break;
                 }
                 Err(error) => {
                     failure = Some(error.to_string());
@@ -459,22 +485,203 @@ pub fn execute_workflow_invocations(world: &mut World) {
         }
 
         let mut entity = world.entity_mut(invocation);
-        entity.insert(trace);
+        entity.insert((
+            trace,
+            WorkflowRunCursor {
+                current_prompt: current_prompt.clone(),
+                remaining,
+            },
+        ));
 
         if let Some(error) = failure {
             entity.insert(WorkflowRunStatus::Failed);
             entity.insert(WorkflowRunFailure(error));
             entity.remove::<WorkflowRunResult>();
+            entity.remove::<WorkflowAwaitingTool>();
+            entity.remove::<WorkflowAwaitingAgent>();
             continue;
         }
 
-        entity.insert(WorkflowRunCursor {
-            current_prompt: current_prompt.clone(),
-            remaining,
-        });
+        if let Some(waiting) = awaiting_tool {
+            entity.insert((WorkflowRunStatus::Running, waiting));
+            entity.remove::<WorkflowRunResult>();
+            entity.remove::<WorkflowRunFailure>();
+            continue;
+        }
+
+        if let Some(waiting) = awaiting_agent {
+            entity.insert((WorkflowRunStatus::Running, waiting));
+            entity.remove::<WorkflowRunResult>();
+            entity.remove::<WorkflowRunFailure>();
+            continue;
+        }
+
         entity.insert(WorkflowRunStatus::Completed);
         entity.insert(WorkflowRunResult(current_prompt));
         entity.remove::<WorkflowRunFailure>();
+        entity.remove::<WorkflowAwaitingTool>();
+        entity.remove::<WorkflowAwaitingAgent>();
+    }
+}
+
+pub fn apply_workflow_tool_results(
+    mut commands: Commands,
+    mut completed: MessageReader<ToolCallCompleted>,
+    mut failed: MessageReader<ToolCallFailed>,
+    awaiting: Query<(Entity, &WorkflowAwaitingTool), With<WorkflowInvocation>>,
+    mut invocations: Query<
+        (
+            &mut WorkflowRunCursor,
+            &mut WorkflowRunTrace,
+            &mut WorkflowRunStatus,
+        ),
+        (With<WorkflowInvocation>, Without<WorkflowRunFinalized>),
+    >,
+    nodes: Query<(&WorkflowNodeName, &WorkflowNodeKind, &WorkflowEdges), With<WorkflowNode>>,
+) {
+    let awaiting_by_call = awaiting
+        .iter()
+        .map(|(invocation, waiting)| (waiting.call_id.clone(), (invocation, waiting.node)))
+        .collect::<HashMap<_, _>>();
+
+    for message in completed.read() {
+        let Some((invocation, node)) = awaiting_by_call.get(&message.call.call_id).copied() else {
+            continue;
+        };
+        let Ok((mut cursor, mut trace, mut status)) = invocations.get_mut(invocation) else {
+            continue;
+        };
+        let Ok((name, kind, edges)) = nodes.get(node) else {
+            *status = WorkflowRunStatus::Failed;
+            commands
+                .entity(invocation)
+                .insert(WorkflowRunFailure(format!(
+                    "workflow node {:?} is missing metadata while resolving tool result",
+                    node
+                )));
+            commands.entity(invocation).remove::<WorkflowAwaitingTool>();
+            continue;
+        };
+
+        let next_prompt = tool_output_to_prompt(&message.output);
+        let next_nodes = select_workflow_targets(kind, &next_prompt, &edges.0);
+        trace
+            .0
+            .push(format!("{} [{kind:?}] => {next_prompt}", name.0));
+        cursor.current_prompt = next_prompt;
+        for target in next_nodes {
+            cursor.remaining.push_back(target);
+        }
+        *status = WorkflowRunStatus::Running;
+        commands.entity(invocation).remove::<WorkflowAwaitingTool>();
+    }
+
+    for message in failed.read() {
+        let Some((invocation, node)) = awaiting_by_call.get(&message.call.call_id).copied() else {
+            continue;
+        };
+        let Ok((_, mut trace, mut status)) = invocations.get_mut(invocation) else {
+            continue;
+        };
+        trace
+            .0
+            .push(format!("{:?} [Tool] failed => {}", node, message.error));
+        *status = WorkflowRunStatus::Failed;
+        commands
+            .entity(invocation)
+            .insert(WorkflowRunFailure(format!(
+                "workflow tool node {:?} failed: {}",
+                node, message.error
+            )));
+        commands.entity(invocation).remove::<WorkflowRunResult>();
+        commands.entity(invocation).remove::<WorkflowAwaitingTool>();
+    }
+}
+
+pub fn apply_workflow_run_results(
+    mut commands: Commands,
+    mut committed: MessageReader<RunCommitted>,
+    mut failed: MessageReader<RunFailed>,
+    awaiting: Query<(Entity, &WorkflowAwaitingAgent), With<WorkflowInvocation>>,
+    mut invocations: Query<
+        (
+            &mut WorkflowRunCursor,
+            &mut WorkflowRunTrace,
+            &mut WorkflowRunStatus,
+        ),
+        (With<WorkflowInvocation>, Without<WorkflowRunFinalized>),
+    >,
+    runs: Query<&RunResultText>,
+    nodes: Query<(&WorkflowNodeName, &WorkflowNodeKind, &WorkflowEdges), With<WorkflowNode>>,
+) {
+    let awaiting_by_run = awaiting
+        .iter()
+        .map(|(invocation, waiting)| (waiting.run, (invocation, waiting.node)))
+        .collect::<HashMap<_, _>>();
+
+    for message in committed.read() {
+        let Some((invocation, node)) = awaiting_by_run.get(&message.run).copied() else {
+            continue;
+        };
+        let Ok(result) = runs.get(message.run) else {
+            continue;
+        };
+        let Ok((mut cursor, mut trace, mut status)) = invocations.get_mut(invocation) else {
+            continue;
+        };
+        let Ok((name, kind, edges)) = nodes.get(node) else {
+            *status = WorkflowRunStatus::Failed;
+            commands
+                .entity(invocation)
+                .insert(WorkflowRunFailure(format!(
+                    "workflow node {:?} is missing metadata while resolving agent result",
+                    node
+                )));
+            commands
+                .entity(invocation)
+                .remove::<WorkflowAwaitingAgent>();
+            continue;
+        };
+
+        let next_prompt = result.0.clone();
+        let next_nodes = select_workflow_targets(kind, &next_prompt, &edges.0);
+        trace
+            .0
+            .push(format!("{} [{kind:?}] => {next_prompt}", name.0));
+        cursor.current_prompt = next_prompt;
+        for target in next_nodes {
+            cursor.remaining.push_back(target);
+        }
+        *status = WorkflowRunStatus::Running;
+        commands
+            .entity(invocation)
+            .remove::<WorkflowAwaitingAgent>();
+    }
+
+    for message in failed.read() {
+        let Some(run) = message.run else {
+            continue;
+        };
+        let Some((invocation, node)) = awaiting_by_run.get(&run).copied() else {
+            continue;
+        };
+        let Ok((_, mut trace, mut status)) = invocations.get_mut(invocation) else {
+            continue;
+        };
+        trace
+            .0
+            .push(format!("{:?} [Agent] failed => {}", node, message.error));
+        *status = WorkflowRunStatus::Failed;
+        commands
+            .entity(invocation)
+            .insert(WorkflowRunFailure(format!(
+                "workflow agent node {:?} failed: {}",
+                node, message.error
+            )));
+        commands.entity(invocation).remove::<WorkflowRunResult>();
+        commands
+            .entity(invocation)
+            .remove::<WorkflowAwaitingAgent>();
     }
 }
 
@@ -565,13 +772,20 @@ struct WorkflowStepOutcome {
     trace_line: String,
 }
 
+#[derive(Debug)]
+enum WorkflowNodeOutcome {
+    Continue(WorkflowStepOutcome),
+    AwaitTool(WorkflowAwaitingTool),
+    AwaitAgent(WorkflowAwaitingAgent),
+}
+
 fn execute_workflow_node(
     world: &mut World,
     workflow: Entity,
     invocation: Entity,
     node: Entity,
     input: &str,
-) -> Result<WorkflowStepOutcome, WorkflowExecutionError> {
+) -> Result<WorkflowNodeOutcome, WorkflowExecutionError> {
     let name = world
         .get::<WorkflowNodeName>(node)
         .map(|name| name.0.clone())
@@ -598,7 +812,7 @@ fn execute_workflow_node(
                 },
             )?;
 
-            if spec.provider.is_some() {
+            if world.get::<AgentModelRef>(binding.0).is_some() {
                 let session = world.get::<WorkflowRunSession>(invocation).copied().ok_or(
                     WorkflowExecutionError::AgentFailure {
                         node,
@@ -608,12 +822,21 @@ fn execute_workflow_node(
                         ),
                     },
                 )?;
-
-                execute_agent_prompt(world, binding.0, input, Some(session.0), Some(input))
-                    .map_err(|error| WorkflowExecutionError::AgentFailure {
-                        node,
-                        error: error.to_string(),
-                    })?
+                let run = world
+                    .spawn((
+                        RunBundle::new(binding.0, session.0, input.to_string()),
+                        RunContextQuery::default(),
+                    ))
+                    .id();
+                world.spawn(ChatMessageBundle::new(
+                    session.0,
+                    ChatMessageRole::User,
+                    input.to_string(),
+                ));
+                return Ok(WorkflowNodeOutcome::AwaitAgent(WorkflowAwaitingAgent {
+                    node,
+                    run,
+                }));
             } else {
                 format!("{} ({}) processed: {}", spec.name, spec.model, input)
             }
@@ -634,24 +857,11 @@ fn execute_workflow_node(
                     "workflow": format!("{workflow:?}"),
                 }),
             );
-            match dispatch_tool(world, call) {
-                Ok(Ok(output)) => output
-                    .as_text()
-                    .map(ToOwned::to_owned)
-                    .unwrap_or_else(|| output.value.to_string()),
-                Ok(Err(error)) => {
-                    return Err(WorkflowExecutionError::ToolFailure {
-                        node,
-                        error: error.message,
-                    });
-                }
-                Err(error) => {
-                    return Err(WorkflowExecutionError::ToolFailure {
-                        node,
-                        error: error.to_string(),
-                    });
-                }
-            }
+            world.write_message(ToolCallRequested { call: call.clone() });
+            return Ok(WorkflowNodeOutcome::AwaitTool(WorkflowAwaitingTool {
+                node,
+                call_id: call.call_id,
+            }));
         }
         WorkflowNodeKind::Prompt => world
             .get::<WorkflowNodePromptTemplate>(node)
@@ -665,11 +875,11 @@ fn execute_workflow_node(
     let next_nodes = select_workflow_targets(&kind, &next_prompt, &edges.0);
     let trace_line = format!("{name} [{kind:?}] => {next_prompt}");
 
-    Ok(WorkflowStepOutcome {
+    Ok(WorkflowNodeOutcome::Continue(WorkflowStepOutcome {
         next_prompt,
         next_nodes,
         trace_line,
-    })
+    }))
 }
 
 fn select_workflow_targets(
@@ -702,6 +912,13 @@ fn render_workflow_result(trace: &WorkflowRunTrace, result: &str) -> String {
         trace.0.join("\n"),
         result
     )
+}
+
+fn tool_output_to_prompt(output: &ToolOutput) -> String {
+    output
+        .as_text()
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| output.value.to_string())
 }
 
 fn insert_workflow_failure(world: &mut World, invocation: Entity, error: impl Into<String>) {

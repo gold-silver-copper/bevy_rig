@@ -10,6 +10,7 @@ fn main() {
         RunExecution,
         (
             queue_reverse_tool_calls.before(ToolDispatchSystems),
+            execute_reverse_text_tool.in_set(ToolDispatchSystems),
             finalize_tool_runs.after(ToolDispatchSystems),
         ),
     );
@@ -31,7 +32,6 @@ fn main() {
             )))
             .id();
 
-        register_tool_system(world, tool, reverse_text).expect("tool registration should work");
         attach_tool(world, handles.agent, tool).expect("tool link should work");
         handles.agent
     };
@@ -101,12 +101,35 @@ fn finalize_tool_runs(
     }
 }
 
-fn reverse_text(In(call): In<ToolCall>) -> ToolExecutionResult {
-    let text = call
-        .args
-        .get("text")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| ToolExecutionError::new("missing text argument"))?;
+fn execute_reverse_text_tool(
+    mut commands: Commands,
+    tool_specs: Query<&ToolSpec>,
+    invocations: Query<(Entity, &ToolInvocationCall, &ToolInvocationStatus), With<ToolInvocation>>,
+) {
+    for (invocation, call, status) in &invocations {
+        if *status != ToolInvocationStatus::Queued {
+            continue;
+        }
 
-    Ok(ToolOutput::text(text.chars().rev().collect::<String>()))
+        let Ok(spec) = tool_specs.get(call.0.tool) else {
+            continue;
+        };
+        if spec.name != "reverse_text" {
+            continue;
+        }
+
+        let text = match call.0.args.get("text").and_then(|value| value.as_str()) {
+            Some(text) => text,
+            None => {
+                fail_tool_invocation(&mut commands, invocation, "missing text argument");
+                continue;
+            }
+        };
+
+        complete_tool_invocation(
+            &mut commands,
+            invocation,
+            ToolOutput::text(text.chars().rev().collect::<String>()),
+        );
+    }
 }

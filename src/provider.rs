@@ -6,6 +6,47 @@ use serde::{Deserialize, Serialize};
 #[derive(Component, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Provider;
 
+#[derive(Component, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProviderHealth {
+    #[default]
+    Unknown,
+    Reachable,
+    Unreachable,
+}
+
+impl ProviderHealth {
+    pub fn allows_requests(&self) -> bool {
+        !matches!(self, Self::Unreachable)
+    }
+}
+
+#[derive(Component, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProviderAuthState {
+    #[default]
+    Unknown,
+    NotRequired,
+    Ready,
+    Missing,
+    Invalid,
+}
+
+impl ProviderAuthState {
+    pub fn for_spec(spec: &ProviderSpec) -> Self {
+        if spec.is_local {
+            Self::NotRequired
+        } else {
+            Self::Unknown
+        }
+    }
+
+    pub fn allows_requests(&self) -> bool {
+        matches!(self, Self::Unknown | Self::NotRequired | Self::Ready)
+    }
+}
+
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderRevision(pub u64);
+
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ProviderKind {
     Anthropic,
@@ -83,31 +124,38 @@ pub struct ProviderBundle {
     pub provider: Provider,
     pub spec: ProviderSpec,
     pub capabilities: ProviderCapabilities,
+    pub health: ProviderHealth,
+    pub auth_state: ProviderAuthState,
+    pub revision: ProviderRevision,
 }
 
 impl ProviderBundle {
     pub fn new(spec: ProviderSpec, capabilities: ProviderCapabilities) -> Self {
+        let auth_state = ProviderAuthState::for_spec(&spec);
         Self {
             provider: Provider,
             spec,
             capabilities,
+            health: ProviderHealth::default(),
+            auth_state,
+            revision: ProviderRevision::default(),
         }
     }
 }
 
 #[derive(Clone, Debug)]
-pub struct RegisteredProvider {
+pub struct CatalogProvider {
     pub kind: ProviderKind,
     pub default_label: &'static str,
     pub capabilities: ProviderCapabilities,
 }
 
 #[derive(Resource, Clone, Debug)]
-pub struct ProviderRegistry {
-    by_kind: HashMap<ProviderKind, RegisteredProvider>,
+pub struct ProviderCatalog {
+    by_kind: HashMap<ProviderKind, CatalogProvider>,
 }
 
-impl Default for ProviderRegistry {
+impl Default for ProviderCatalog {
     fn default() -> Self {
         let mut registry = Self {
             by_kind: HashMap::new(),
@@ -136,7 +184,7 @@ impl Default for ProviderRegistry {
         ] {
             registry.by_kind.insert(
                 kind,
-                RegisteredProvider {
+                CatalogProvider {
                     kind,
                     default_label: label,
                     capabilities: ProviderCapabilities::text_tooling(),
@@ -148,8 +196,8 @@ impl Default for ProviderRegistry {
     }
 }
 
-impl ProviderRegistry {
-    pub fn get(&self, kind: ProviderKind) -> Option<&RegisteredProvider> {
+impl ProviderCatalog {
+    pub fn get(&self, kind: ProviderKind) -> Option<&CatalogProvider> {
         self.by_kind.get(&kind)
     }
 

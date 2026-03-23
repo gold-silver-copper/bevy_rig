@@ -1,4 +1,4 @@
-use bevy_ecs::{hierarchy::ChildOf, prelude::*};
+use bevy_ecs::prelude::*;
 use thiserror::Error;
 
 use crate::{model::ModelSpec, session};
@@ -11,7 +11,6 @@ pub struct AgentSpec {
     pub name: String,
     pub model: String,
     pub max_turns: Option<usize>,
-    pub provider: Option<Entity>,
 }
 
 impl AgentSpec {
@@ -20,13 +19,7 @@ impl AgentSpec {
             name: name.into(),
             model: model.into(),
             max_turns: None,
-            provider: None,
         }
-    }
-
-    pub fn with_provider(mut self, provider: Entity) -> Self {
-        self.provider = Some(provider);
-        self
     }
 
     pub fn with_max_turns(mut self, max_turns: usize) -> Self {
@@ -111,14 +104,8 @@ pub fn spawn_agent_from_model(
             AgentModelError::MissingModelSpec(model)
         }
     })?;
-    let provider = world.get::<ChildOf>(model).map(ChildOf::parent);
 
-    let mut spec = AgentSpec::new(name, model_spec.name);
-    if let Some(provider) = provider {
-        spec = spec.with_provider(provider);
-    }
-
-    let handles = spawn_agent(world, spec);
+    let handles = spawn_agent(world, AgentSpec::new(name, model_spec.name));
     world.entity_mut(handles.agent).insert(AgentModelRef(model));
     Ok(handles)
 }
@@ -135,7 +122,6 @@ pub fn bind_model(world: &mut World, agent: Entity, model: Entity) -> Result<(),
             AgentModelError::MissingModelSpec(model)
         }
     })?;
-    let provider = world.get::<ChildOf>(model).map(ChildOf::parent);
 
     let mut entity = world.entity_mut(agent);
     {
@@ -143,7 +129,6 @@ pub fn bind_model(world: &mut World, agent: Entity, model: Entity) -> Result<(),
             .get_mut::<AgentSpec>()
             .expect("agent bundles always include AgentSpec");
         spec.model = model_spec.name;
-        spec.provider = provider;
     }
     entity.insert(AgentModelRef(model));
 

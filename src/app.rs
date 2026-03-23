@@ -8,8 +8,8 @@ use crate::{
     context::{self, ContextIndex},
     diagnostics::{self, RuntimeDiagnostics},
     model::ModelRegistry,
-    provider::ProviderRegistry,
-    rig_runtime::{self, RigRuntime},
+    provider::ProviderCatalog,
+    rig_runtime::{self, ProviderClientCache, RigRuntime},
     run::{self, CancelRun, RunAgent, RunCommitted, RunFailed, StreamCompleted, TextDelta},
     tool::{self, ToolCallCompleted, ToolCallFailed, ToolCallRequested, ToolRegistry},
     workflow::{self, RunWorkflow, WorkflowCommitted, WorkflowFailed},
@@ -54,10 +54,11 @@ pub struct BevyRigPlugin;
 impl Plugin for BevyRigPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ToolRegistry>()
-            .init_resource::<ProviderRegistry>()
+            .init_resource::<ProviderCatalog>()
             .init_resource::<ModelRegistry>()
             .init_resource::<ContextIndex>()
             .init_resource::<RuntimeDiagnostics>()
+            .init_resource::<ProviderClientCache>()
             .init_resource::<RigRuntime>()
             .add_message::<RunAgent>()
             .add_message::<CancelRun>()
@@ -88,7 +89,14 @@ impl Plugin for BevyRigPlugin {
                     .chain(),
             )
             .configure_sets(RunCommit, RunCommitSystems)
-            .add_systems(CatalogSync, context::rebuild_context_index)
+            .add_systems(
+                CatalogSync,
+                (
+                    context::rebuild_context_index,
+                    tool::rebuild_tool_registry,
+                    rig_runtime::prune_provider_client_cache,
+                ),
+            )
             .add_systems(
                 RunPreparation,
                 (
@@ -110,7 +118,20 @@ impl Plugin for BevyRigPlugin {
             )
             .add_systems(
                 RunExecution,
-                tool::dispatch_requested_tool_calls.in_set(ToolDispatchSystems),
+                tool::queue_requested_tool_calls.before(ToolDispatchSystems),
+            )
+            .add_systems(
+                RunExecution,
+                tool::publish_tool_invocation_results.after(ToolDispatchSystems),
+            )
+            .add_systems(
+                RunExecution,
+                (
+                    rig_runtime::resolve_rig_tool_results,
+                    workflow::apply_workflow_tool_results,
+                    workflow::apply_workflow_run_results,
+                )
+                    .after(tool::publish_tool_invocation_results),
             )
             .add_systems(
                 RunExecution,

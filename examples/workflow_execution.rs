@@ -5,7 +5,10 @@ use serde_json::json;
 
 fn main() {
     let mut app = App::new();
-    app.add_plugins(BevyRigPlugin);
+    app.add_plugins(BevyRigPlugin).add_systems(
+        RunExecution,
+        uppercase_text_tool.in_set(ToolDispatchSystems),
+    );
 
     let workflow = {
         let world = app.world_mut();
@@ -17,8 +20,7 @@ fn main() {
                 json!({"type":"object","properties":{"text":{"type":"string"}}}),
             )))
             .id();
-        register_tool_system(world, uppercase_tool, uppercase_text)
-            .expect("tool registration should work");
+        register_tool(world, uppercase_tool).expect("tool registration should work");
 
         let workflow = spawn_workflow(
             world,
@@ -46,7 +48,9 @@ fn main() {
 
     app.world_mut()
         .write_message(RunWorkflow::new(workflow, "please inspect bevy_rig"));
-    app.update();
+    for _ in 0..3 {
+        app.update();
+    }
 
     let invocation = {
         let mut query = app
@@ -68,12 +72,35 @@ fn main() {
     }
 }
 
-fn uppercase_text(In(call): In<ToolCall>) -> ToolExecutionResult {
-    let text = call
-        .args
-        .get("text")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| ToolExecutionError::new("missing text argument"))?;
+fn uppercase_text_tool(
+    mut commands: Commands,
+    invocations: Query<(Entity, &ToolInvocationCall, &ToolInvocationStatus), With<ToolInvocation>>,
+    specs: Query<&ToolSpec>,
+) {
+    for (invocation, call, status) in &invocations {
+        if *status != ToolInvocationStatus::Queued {
+            continue;
+        }
 
-    Ok(ToolOutput::text(text.to_ascii_uppercase()))
+        let Ok(spec) = specs.get(call.0.tool) else {
+            continue;
+        };
+        if spec.name != "uppercase" {
+            continue;
+        }
+
+        mark_tool_invocation_running(&mut commands, invocation);
+        match call.0.args.get("text").and_then(|value| value.as_str()) {
+            Some(text) => complete_tool_invocation(
+                &mut commands,
+                invocation,
+                ToolOutput::text(text.to_ascii_uppercase()),
+            ),
+            None => fail_tool_invocation(
+                &mut commands,
+                invocation,
+                ToolExecutionError::new("missing text argument").message,
+            ),
+        }
+    }
 }
