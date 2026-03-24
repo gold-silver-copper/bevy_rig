@@ -1,0 +1,190 @@
+
+Improve bevy ecs integration
+
+Welcome screen should give quick game context and show key bindings "You are a cowboy drinking in a saloon when all of a sudden bandits are raiding your town!".
+
+In the key bindings help menu, Combine WASD keys into one section like the IJKL cursor ones, so it doesnt take up as much space.
+
+Knives tomahawks Whiskey (restores stamina and health) dynamite bottle (throw bottle it breaks on contact cant pick up after throw but does damage)
+Add guns other than colt and remington,Maybe some lever action rifles etc
+
+
+
+
+The game should have a system where different actions take different amounts of time. Moving physically takes more time than moving the cursor. Different enemies have different speeds, so a dog can move a tile in a few ticks, a rattlesnake is slow and it takes lots of ticks to move.
+Moving the cursor should cause a tick to pass.
+
+
+
+Improve menuing.
+
+
+Enchance inventory menu. Reloading from it shouldnt close the inv menu. Add ability to drop items.
+
+
+
+Enemies should have a FOV cursor similar to the player. To aim or look anywhere they must move their own cursor as well. The FOV briughtening must show where the enemies are looking at.
+
+
+Remove the gate of hell which is constantly spawning enemy monsters, and out of which corruption spread. Redo the world generation, rather than a forest, I want it to be more like a cowboy western town, with many houses and random furniture around, benches, lamp posts, decorative trees, barrels, boxes, saloons, stables, etc
+
+
+The enemies field of view cone should be tinted red to make it more distinct
+It is hard to tell what is what in terms of furniture. Add a seperate visible items box for furniture that says what each furniture character is.
+Continue improving the world generation, add more building variants, saloon, sheriffs office, post office, etc
+Make the terrain true ascii beauty, use well contrasted colors. Ground and furniture should be earthy and muted, enemies should be bright and visible, items somewhere in the middle. Dont make it too noisy, use dots and commas for ground terrain sparingly, empty colored boxes are ideal for open terrain.
+
+
+remove dead code
+make the world bigger
+
+
+
+Add more interesting environmental mechanics. Some objects should block movement but not vision. Some should block vision but not movement. Some items can get set on fire. Dynamite sets a bit of  stuff on fire. Add molotov weapon as well that sets more stuff on fire. Player should spawn with molotov. Get creative.
+
+Add groups fighting against each other, outlaws vs law vs animals
+Make the NPCs patrol areas. Each should have slightly unique behavior. Sheriff patrols, animals random, outlaws skulk around
+Lower the game framerate to make animations more visible.
+Fire should spread and do damage
+ALL npcs should be hostile to the player
+Npcs should be able to pick up items like dynamite or molotovs and use them as well
+All npcs that have guns should use them. Make the inventory structure of the NPCs exactly the same as that of the player.
+Make NPC movement more natural
+Make the world map larger
+
+
+Fire seems to stay on fire forever, make it burn out eventually, it should destroy everything under it
+Player should only level up from kills that they deal the killing blow on
+Enemies should be able to reload. NPCs should do pathfinding towards any items on the floor that they so that they can use them later.
+Currently in the inventory UI tab, ammo gets cut off
+NPCs dont seem to chase/target the player properly
+Set FPS to 30
+
+
+Enemies are not able to properly attack me if i am standing inside a building and they are inside the doorway. THey will not chase and will not shoot at me.
+In the game log, you should write to who a projectile belongs. "Gunslingers bullet hits Vasquero" "Vasquero kicks Cowboy" etc
+Give NPCs 1850s cowboy themed procedurally generated names. “Dusty” Silas Crowley,Ezekiel Boone,Cornelius Shaw
+Enemies should level up too from their own kills.
+Generate a readme for the game: 1850s cowboy shootout roguelike
+Log only messages of which actions are visible to you. Dont log the whole worlds actions.
+Add footsteps and sounds in the form that an exclamation mark appears on the map in parts which are not visible to the player but produce an auidble event such as footsteps or gunshots or things getting destroyed
+Make guns more accurate or make the enemies better at aiming
+
+
+
+
+Leveling up should not heal you. Remove the ammo stats.
+Character should start with a Colt Pocket, a Knife, a bottle of whiskey, and a molotov.
+Walking/waiting passive heal should be 10x slower.
+Remove equipment like cowboy hat. Have a procedurally generated outfit description for the character.
+Improve randomization, right now every time i play the game it feels the same, I want the city to look more different each time, make the map much larger. 
+Add more dynamic interactions to the map, water troughs should spill water when destroyed. Crates and Barrels should be lootable. Cactus should deal damage, make sure NPCs attempt to avoid cactuses.
+Doing a roundhouse kick should destroy furniture around you.
+
+---
+
+
+"You find yourself in the center of a cowboy standoff, and neither side can figure out whose side you are on, so they decide to use you as a sort of target practice to start their battle."
+
+All Human NPCs and Animal npcs must have capital ascii characters to make them more noticeable. All items and things you could walk over must be lower case. 
+
+Damage seems to be applied to the player twice by accident, this is a bug.
+
+Change the proportions of the ticks for actions, Moving should be 3 ticks, looking with the cursor should be 1 tick. Shooting should be 2 ticks. Reloading should be 6 ticks because reloading a cap and ball is difficult and time consuming. 
+
+NPCs have same inventory system as the player, holding things like guns, knives, molotovs etc, randomized of course. When a NPC dies they drop their whole inventory, including ammo and guns. Remove the item spawning sytem from animals, animals drop nothing.
+
+Add blood to this ascii roguelike, wounded characters leave a trail of bright red blood behind them which darks with time. Blood is represented as a red dot on the tile.
+
+Add a chance to hit for each bullet. If a bullet does go over a player or NPC tile, it has a chance to miss based on how far enemy or player cursor is from the target that was hit, or a small chance to headshot and kill instantly, especially if the cursor is right on the target. If a bullet passes over a player or npc tile then it should log a special message if in view, such as "John's bullet barely misses you!"
+
+Add more item variety to this game, add period rifles for 1850s, Hawken Rifle, Springfield 1842,1855, Enfield 1853, etc Have accurate caliber for each rifle,
+
+After you die you can continue to watch the game play out by pressing the wait key, document that and make it visible on the death screen "press wait to continue watching"
+
+
+-----
+
+Bullets should travel only 12 tiles per tick. So that the player can dodge bullets potentially and its sort of like a bullet time game.
+Range of knives and tomahawks should be limited to 12 tiles and move at 6 tiles per tick. Add a fast blinking effect to all projectiles, especially ones which are stuck in the air between ticks.
+
+Randomizer tick should be reset every single time the game restarts, not just at launch.
+
+With the FOV, make it more narrow the further the cursor gets from the source, so that if the player aims at something far away they will only see a narrow part of the map illuminated. This should apply to npcs as well, and the player should be able to see the NPCs aiming during combat as ticks pass. Do write integration tests for this.
+
+Increase the FOV range significantly, make it at least 3 times further. But when centered on the player its not that far. So basically the FOV range and width is dependent on how far the cursor is from the player. The futher the cursor the greater the fov range, but less the width. With the fov range when centered on the player being a radius of 12 and in all directions a circle.
+
+The center of the camera should be centered between the cursor and the player.
+Remove the inventory backpack menu, all actions should be doable from within the main game screen. Throw random item instead of dropping specific item is fun mechanic.
+The ammo UI should be limited to 3 entries per row
+
+When you drop something you instantly pick it up, this is a bug. Remove the ability to drop items, a player can only throw a random object by pressing 0. 
+
+Inventory should be limited to 6 items. buttons 7 8 9 0 should be reserved for special abilities.
+
+Current log system is broken, logs flash through the screen then disappear, leaving me with (no events), when i obviously saw a few. Fix this behavior
+
+
+Special abilities
+
+7 - Dual wield shot, shoot once using two random revolvers that you have in your inventory
+8 - Fan shot, shoot all the rounds from a random revolver at once
+9 - Throw sand, create small temporary sand cloud in front of you, in direction of the cursor, that blocks vision, has no effect on movement or projectiles
+0 - Throw a random item from your inventory towards the cursor, will damage enemies if contact is made 
+
+
+Z - Dive, Move 3 tiles instantly in direction of the cursor, takes 20 stamina
+
+Add a small chance for guns to misfire
+
+Remove bandages from the game, alcohol is the only way to heal.
+Change roundhouse key from E to F.
+Move wait key from . to T
+Move ESC to Q, Q should also close help screen if pressed. And then if on game screen, pressing Q opens the escape menu. Pressing Q again closes the escape menu. To exit the game, press E for exit dialog then Y to confirm.
+
+Seed a dynamic rng through map seed + tick count. Use it for whenever we need rng during game play. Or are we currently using something better?
+
+
+----
+
+watching after death is broken
+
+Fix the FOV system, when the player moves the cursor off center, they should no longer be able to see behind themselves. 
+
+Increase the distance that FOV can see, radius of 12 is too small, make it 36 when on center, make distance grow more aggresively as cursor is moved further. So when cursor is 2 tiles away the player can see maybe 60 tiles away with a FOV of 90 degrees
+
+Add a god mode for testing in which the player cannot take damage. make it toggleable with G
+
+Make the sand stay in the air for a 10 ticks when it is thrown
+Enemies should throw sand sometimes too, but somewhat rarely, maybe with 1/100 chance.
+
+When the game starts, a large amount of events go through the log, with many NPCs dying before a single tick has occured. Fix this.
+
+The log should only contain information the player can witness within their line of sight.
+
+
+Refactor the roguelike codebase to be deeply ECS-native using Bevy best practices. Audit every system, component, and resource — anything that doesn't belong in ECS (ad-hoc state management, monolithic functions, manual entity lookups) should be rearchitected into proper components, systems, and events. Anything that does belong inside the ECS but isn't yet, should be moved into the ECS. Remove all dead code, unused imports, and unreachable branches. Where logic is duplicated or overly verbose, extract it into focused helper functions or shared systems. The goal is a leaner and more correct codebase: reduce overall code size without cutting any existing functionality, without removing or degrading documentation, and without introducing regressions. Leave the code more readable and idiomatic than you found it.
+
+----
+Way too much red from NPCs, give them more limited FOV maybe
+
+The log in the UI shouldnt reset every tick, it should append new events from each tick, dont wipe previous ones.
+
+Fix reloading, if the first gun cannot be reloaded due to missing bullet type, but has enough powder and caps, try to reload other guns in the inventory.
+
+Limit the FOV of NPCs, animals should have a reall small one, human NPCs should never have the circle fov, they should always be looking at a distance with their cursor, and their fov should be more narrow than the players.
+Waiting after death does not work, it does not progress time. The you died screen should show up not in the center of the screen but right above the UI. 
+
+Throwing sand should spawn visible sand dust clouds in front of the player which stay for 12 ticks. These dust clouds should block sight, so that NPCs and the player cannot see through them. 
+
+---
+
+Add UI animations using tachyonfx?
+
+Overhaul and Improve NPC AI- pathing, chasing, combat, item usage behavior, etc. Write extensive integration tests for this. Update old tests if necessary. The human NPCs should have every ability the player does.
+
+Thrown Sand particles should stay visible in the air. Represent them with asterisk. While i move around the asterisks should hang around and slowly disperse over 12 ticks.
+
+The log is still broken aaa. Remove dropped gear log message
+
+Player should spawn inside a saloon

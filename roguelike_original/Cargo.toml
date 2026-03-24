@@ -1,0 +1,46 @@
+[package]
+name = "roguelike"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["terminal"]
+terminal = ["bevy_ratatui/crossterm"]
+windowed = ["bevy_ratatui/windowed"]
+
+[dependencies]
+bevy = { version = "0.18", default-features = false, features = [
+    "async_executor",
+    "bevy_asset",
+    "bevy_core_pipeline",
+    "bevy_render",
+    "bevy_sprite",
+    "bevy_state",
+    "bevy_ui",
+    "bevy_window",
+    "bevy_winit",
+    "multi_threaded",
+    "png",
+    "std",
+    "x11",
+] }
+bevy_ratatui = { path = "../bevy_ratatui", default-features = false, features = [
+    "std",
+    "async_executor",
+    "keyboard",
+    "mouse",
+] }
+ratatui = { version = "0.30.0", default-features = false, features = [
+    "underline-color",
+] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3"
+
+# Enable a small amount of optimization in debug mode
+[profile.dev]
+opt-level = 1
+
+# Enable high optimizations for dependencies (incl. Bevy), but not for our code:
+[profile.dev.package."*"]
+opt-level = 3

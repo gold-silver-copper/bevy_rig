@@ -1,0 +1,120 @@
+NPcs should store recent conversation context internally, to have long deep conversations. EVery npc should have their own memory of things they did, saw, heard, said, etc
+
+Should be able to control wait time down to the second
+Current time should be added to the context of npcs
+
+add a cool bus system with time passing as u ride around inside the bus.
+
+minimum time to wait should be 1s
+dont have specific car controls, instead there should be a generic interact key which then lists all entities in your location, and you can select an entity and interact with it, with people you can talk, with cars u can enter or exit, etc
+This means you should also remove the specific people command, the interact with entities command should allow u to talk to people or enter cars or any other entity interaction
+
+
+
+
+SILVERTERM STUFF:
+---------------------
+
+font and config stuff
+ligatures
+better CJK fallback
+
+test unicode 17 support?
+
+ENGLISH STUFF:
+-----------------------
+All base nouns and verbs should be built up first with all neccesary info such as gender, countable, etc only then can they be passed into the phrase builder
+
+Store the results of test runs for future comparison
+
+
+
+WEBSITE RATZILLA:
+---------------------
+
+Make dom text selectable
+
+
+
+----
+I should update bevy_ratatui a bit
+Upgrade soft_ratatui
+Copy paste in website
+stuff in the url for the website
+
+
+
+INTERVIEW
+-------------
+Agent authentication OIDC token  
+Read through issues PRs etc
+agent to agent
+security
+compaction
+
+
+RIG INTERVEIW:
+
+I am gold silver copper, I do open source all day. Mainly I work with ratatui, I write custom backends, make demos, and upstream bugfixes and improvements. I also really like bevy, which I try to use whenever I need a more high level runtime framework. For personal projects, I love working on NLP tools, and things related to programming language design, also working on my website.
+
+I had been doing Open Source in various ways for a long time. First i would just release everything I made as gpl, then I started doing small contributions to projects I was interested, eventually started collaborating, and now I just collaborate and release a lot of libraries.
+
+Lately I have been writing less code, and more so reviewing AI code.
+I like having AI write proc macros and build scripts for me.
+
+My AI experience: Background in linguistics and LISP, writting grammatical parsers. Then I got introduced to SpaCy which did grammatical analysis using machine learning. Also began using UDpipe and pymorphy, for further NLP work. Pymorphy would inflect words. Heard about openai and gpt models a long time ago, like 7 years ago. Used to play around with very early pre chatgpt models, but they werent that great back then. 
+
+My database experience: Managed a few sqlite dbs when I was an IT consultant, read a lot of postgres docs when working with GIS stuff, certified in neo4j graph database.
+
+Networking experience: Making multiplayer game prototypes in python, javascript, and rust. Using async: tokio, fastapi, websockets, quic 
+
+Cryptography experience: JWT tokens, signing private public keys. Tokens can have permission scopes, time to live, etc
+
+Ryzome is like ComfyUI for LLMs? What is the tech stack of Ryzome?
+
+It would be cool to work on projects like VT Code or IronClaw, but it's hard to figure out what to do different in the space so as to be better.
+IronClaw is really cool, I love Near, I contributed to their documentation a bit, I think they have the best smart contract API out of any crypto.
+
+Dwarf fortress pfp????
+
+
+Projects I tried to make with rig: text based game, tavern simulation game, bevy_rig integration. Gonna use it for my chinese learning game.
+
+text game: uses petgraph as underlying world and source of truth, similar to a knowledge graph.
+
+bevy_rig: agents as entities, tools as systems.
+
+I plan on using the text to speech capabilities of rig for my chinese language learning game.
+
+
+-------------
+
+Questioons for rig interview:
+What are the expectations you have for me in the role? Josh said that a lot of it is reviewing PRs and interacting with the community.
+What are you guys working on other than rig? What is the tech stack for Ryzome?
+
+
+
+-----
+
+Questions for josh:
+What does the job entail?
+What do you do as the maintainer?
+Where do you think Rig has space to improve, what are current pain points?
+Does righ have any serious competitors?
+In your eyes what direction is rig headed, whats up with the crypto stuff?
+how much AI do you use to work on rig, which ones?
+What skillset are you looking for, just curious even for the future.
+
+What is your educational background.
+
+lots of discord spammers looking for devs 
+
+
+
+Statements:
+I was waiting for AI to get better before really diving in with it, and I saw it improve a lot in the last few months, so I'm starting to get more active around AI dev
+I have experience working with knowledge graphs and graphs in general
+Experience working with tools that use vector embeddings aka RAG
+
+Being a maintainer means judging quality and knowing when to say no 
