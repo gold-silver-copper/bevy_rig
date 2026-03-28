@@ -43,6 +43,7 @@ impl Plugin for NodeGraphEditorPlugin {
                 Update,
                 (
                     handle_editor_buttons,
+                    handle_node_buttons,
                     handle_text_edit_input,
                     handle_canvas_zoom,
                     sync_node_views,
@@ -59,24 +60,38 @@ struct GraphUiRegistry {
     canvas: Option<Entity>,
     overlay_layer: Option<Entity>,
     node_layer: Option<Entity>,
-    inspector_text: Option<Entity>,
-    editor_text: Option<Entity>,
     status_text: Option<Entity>,
     node_views: HashMap<NodeId, Entity>,
     overlay_entities: Vec<Entity>,
     last_graph_revision: u64,
+    last_edit_revision: u64,
 }
 
 #[derive(Resource, Default)]
 struct TextEditingState {
     target: Option<NodeId>,
     buffer: String,
+    revision: u64,
 }
 
 impl TextEditingState {
     fn clear(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
         self.target = None;
         self.buffer.clear();
+    }
+
+    fn begin_if_needed(&mut self, target: NodeId, value: &str) {
+        if self.target == Some(target) {
+            return;
+        }
+        self.target = Some(target);
+        self.buffer = value.to_string();
+        self.revision = self.revision.wrapping_add(1);
+    }
+
+    fn mark_changed(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
     }
 }
 
@@ -94,12 +109,6 @@ struct NodeHeaderView {
 }
 
 #[derive(Component)]
-struct InspectorText;
-
-#[derive(Component)]
-struct EditorText;
-
-#[derive(Component)]
 struct ToolbarStatusText;
 
 #[derive(Component, Clone, Copy)]
@@ -107,16 +116,36 @@ enum EditorAction {
     ResetDemo,
     RunSelectedAgent,
     RefreshOllama,
-    EditSelectedText,
-    CommitTextEdit,
-    CancelTextEdit,
-    PreviousSetting,
-    NextSetting,
     AddNode(NodeTemplate),
 }
 
 #[derive(Component)]
 struct EditorButton(EditorAction);
+
+#[derive(Component, Clone, Copy)]
+enum NodeAction {
+    SaveText(NodeId),
+    CancelText(NodeId),
+    PreviousSetting(NodeId),
+    NextSetting(NodeId),
+}
+
+#[derive(Component)]
+struct NodeActionButton(NodeAction);
+
+fn select_node_for_editing(
+    graph: &mut GraphEditorState,
+    editing: &mut TextEditingState,
+    node_id: NodeId,
+) {
+    let selection_changed = graph.selected_node != Some(node_id);
+    graph.selected_node = Some(node_id);
+    if let Some(value) = graph.node_kind(node_id).and_then(NodeKind::editable_text) {
+        editing.begin_if_needed(node_id, value);
+    } else if selection_changed || editing.target.is_some() {
+        editing.clear();
+    }
+}
 
 fn setup_editor_ui(mut commands: Commands, mut registry: ResMut<GraphUiRegistry>) {
     commands.spawn(Camera2d);
@@ -153,9 +182,6 @@ fn setup_editor_ui(mut commands: Commands, mut registry: ResMut<GraphUiRegistry>
         .id();
     commands.entity(root).add_child(sidebar);
 
-    let mut inspector_text = None;
-    let mut editor_text = None;
-
     commands.entity(sidebar).with_children(|parent| {
         parent.spawn((
             Text::new("Bevy Rig Graph"),
@@ -188,88 +214,6 @@ fn setup_editor_ui(mut commands: Commands, mut registry: ResMut<GraphUiRegistry>
                 spawn_editor_button(row, "Run Selected Agent", EditorAction::RunSelectedAgent, 48.0);
                 spawn_editor_button(row, "Refresh Ollama", EditorAction::RefreshOllama, 48.0);
                 spawn_editor_button(row, "Reset Demo", EditorAction::ResetDemo, 48.0);
-                spawn_editor_button(row, "Edit Selected", EditorAction::EditSelectedText, 48.0);
-                spawn_editor_button(row, "Commit Edit", EditorAction::CommitTextEdit, 48.0);
-                spawn_editor_button(row, "Cancel Edit", EditorAction::CancelTextEdit, 48.0);
-                spawn_editor_button(row, "Prev Setting", EditorAction::PreviousSetting, 48.0);
-                spawn_editor_button(row, "Next Setting", EditorAction::NextSetting, 48.0);
-            });
-
-        parent
-            .spawn((
-                Node {
-                    width: Val::Percent(100.0),
-                    padding: UiRect::all(Val::Px(12.0)),
-                    flex_direction: FlexDirection::Column,
-                    row_gap: Val::Px(8.0),
-                    border: UiRect::all(Val::Px(1.0)),
-                    border_radius: BorderRadius::all(Val::Px(10.0)),
-                    ..default()
-                },
-                BackgroundColor(Color::srgb_u8(34, 36, 40)),
-                BorderColor::all(Color::srgb_u8(58, 60, 66)),
-            ))
-            .with_children(|panel| {
-                panel.spawn((
-                    Text::new("Selection"),
-                    TextFont {
-                        font_size: 15.0,
-                        ..default()
-                    },
-                    TextColor(Color::srgb_u8(248, 249, 251)),
-                ));
-                inspector_text = Some(
-                    panel
-                        .spawn((
-                            Text::new("Nothing selected."),
-                            TextFont {
-                                font_size: 13.0,
-                                ..default()
-                            },
-                            TextColor(Color::srgb_u8(185, 188, 194)),
-                            InspectorText,
-                        ))
-                        .id(),
-                );
-            });
-
-        parent
-            .spawn((
-                Node {
-                    width: Val::Percent(100.0),
-                    min_height: Val::Px(180.0),
-                    padding: UiRect::all(Val::Px(12.0)),
-                    flex_direction: FlexDirection::Column,
-                    row_gap: Val::Px(8.0),
-                    border: UiRect::all(Val::Px(1.0)),
-                    border_radius: BorderRadius::all(Val::Px(10.0)),
-                    ..default()
-                },
-                BackgroundColor(Color::srgb_u8(34, 36, 40)),
-                BorderColor::all(Color::srgb_u8(58, 60, 66)),
-            ))
-            .with_children(|panel| {
-                panel.spawn((
-                    Text::new("Editor"),
-                    TextFont {
-                        font_size: 15.0,
-                        ..default()
-                    },
-                    TextColor(Color::srgb_u8(248, 249, 251)),
-                ));
-                editor_text = Some(
-                    panel
-                        .spawn((
-                            Text::new("Select a text-capable node and click Edit Selected."),
-                            TextFont {
-                                font_size: 13.0,
-                                ..default()
-                            },
-                            TextColor(Color::srgb_u8(185, 188, 194)),
-                            EditorText,
-                        ))
-                        .id(),
-                );
             });
 
         parent.spawn((
@@ -303,7 +247,8 @@ fn setup_editor_ui(mut commands: Commands, mut registry: ResMut<GraphUiRegistry>
                  • Middle-drag the canvas to pan\n\
                  • Cmd/Ctrl + scroll to zoom the canvas\n\
                  • Click one port, then another compatible port to connect\n\
-                 • Edit text nodes in the sidebar\n\
+                 • Select a text node and type directly inside it\n\
+                 • Save or cancel edits on the node itself\n\
                  • Run the selected Agent node to produce Text Output",
             ),
             TextFont {
@@ -390,11 +335,14 @@ fn setup_editor_ui(mut commands: Commands, mut registry: ResMut<GraphUiRegistry>
             BackgroundColor(Color::srgb_u8(24, 25, 29)),
         ))
         .observe(
-            |mut click: On<Pointer<Click>>, mut graph: ResMut<GraphEditorState>| {
+            |mut click: On<Pointer<Click>>,
+             mut graph: ResMut<GraphEditorState>,
+             mut editing: ResMut<TextEditingState>| {
                 if click.button == PointerButton::Primary {
                     click.propagate(false);
                     graph.selected_node = None;
                     graph.dragging_wire = None;
+                    editing.clear();
                 }
             },
         )
@@ -438,8 +386,6 @@ fn setup_editor_ui(mut commands: Commands, mut registry: ResMut<GraphUiRegistry>
     registry.canvas = Some(canvas);
     registry.overlay_layer = Some(overlay_layer);
     registry.node_layer = Some(node_layer);
-    registry.inspector_text = inspector_text;
-    registry.editor_text = editor_text;
     registry.status_text = status_text;
 }
 
@@ -470,6 +416,34 @@ fn spawn_editor_button(
             Text::new(label),
             TextFont {
                 font_size: 13.0,
+                ..default()
+            },
+            TextColor(Color::srgb_u8(232, 234, 238)),
+        ));
+}
+
+fn spawn_node_action_button(parent: &mut ChildSpawnerCommands, label: &str, action: NodeAction) {
+    parent
+        .spawn((
+            Button,
+            Node {
+                min_width: Val::Px(74.0),
+                min_height: Val::Px(30.0),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                padding: UiRect::axes(Val::Px(10.0), Val::Px(6.0)),
+                border: UiRect::all(Val::Px(1.0)),
+                border_radius: BorderRadius::all(Val::Px(8.0)),
+                ..default()
+            },
+            NodeActionButton(action),
+            BackgroundColor(button_background(Interaction::None)),
+            BorderColor::all(Color::srgb_u8(62, 64, 70)),
+        ))
+        .with_child((
+            Text::new(label),
+            TextFont {
+                font_size: 12.0,
                 ..default()
             },
             TextColor(Color::srgb_u8(232, 234, 238)),
@@ -517,50 +491,6 @@ fn handle_editor_buttons(
                 Err(error) => runtime.last_status = error.to_string(),
             },
             EditorAction::RefreshOllama => runtime.request_model_refresh(),
-            EditorAction::EditSelectedText => {
-                let Some(selected) = graph.selected_node else {
-                    runtime.last_status = "Select a text-capable node first.".into();
-                    continue;
-                };
-                let Some(value) = graph.selected_text_value() else {
-                    runtime.last_status =
-                        "Selected node is not text-editable. Use Prev/Next for numeric or model nodes.".into();
-                    continue;
-                };
-                editing.target = Some(selected);
-                editing.buffer = value.to_string();
-                runtime.last_status =
-                    "Text editor armed. Type, use Enter for newline, and Ctrl+Enter to commit."
-                        .into();
-            }
-            EditorAction::CommitTextEdit => {
-                let Some(target) = editing.target else {
-                    runtime.last_status = "No text edit is active.".into();
-                    continue;
-                };
-                if graph.set_node_text_value(target, editing.buffer.clone()) {
-                    runtime.last_status = "Committed text edit.".into();
-                } else {
-                    runtime.last_status = "The active node is no longer text-editable.".into();
-                }
-                editing.clear();
-            }
-            EditorAction::CancelTextEdit => {
-                editing.clear();
-                runtime.last_status = "Cancelled text edit.".into();
-            }
-            EditorAction::PreviousSetting => {
-                if !graph.cycle_selected_setting(-1, &runtime.ollama_models) {
-                    runtime.last_status =
-                        "Selected node has no cycle-able setting. Use Edit Selected for text fields.".into();
-                }
-            }
-            EditorAction::NextSetting => {
-                if !graph.cycle_selected_setting(1, &runtime.ollama_models) {
-                    runtime.last_status =
-                        "Selected node has no cycle-able setting. Use Edit Selected for text fields.".into();
-                }
-            }
             EditorAction::AddNode(template) => {
                 let slot = graph.nodes.len() as f32;
                 let spawn = graph
@@ -574,6 +504,54 @@ fn handle_editor_buttons(
                         )
                     });
                 graph.add_node(template.instantiate(), spawn);
+            }
+        }
+    }
+}
+
+fn handle_node_buttons(
+    mut graph: ResMut<GraphEditorState>,
+    mut runtime: ResMut<RigEditorRuntime>,
+    mut editing: ResMut<TextEditingState>,
+    mut interactions: Query<
+        (&Interaction, &NodeActionButton, &mut BackgroundColor),
+        Changed<Interaction>,
+    >,
+) {
+    for (interaction, button, mut background) in &mut interactions {
+        background.0 = button_background(*interaction);
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+
+        match button.0 {
+            NodeAction::SaveText(node_id) => {
+                if editing.target == Some(node_id)
+                    && graph.set_node_text_value(node_id, editing.buffer.clone())
+                {
+                    runtime.last_status = "Saved node text.".into();
+                    editing.clear();
+                } else {
+                    runtime.last_status = "No active inline text edit for this node.".into();
+                }
+            }
+            NodeAction::CancelText(node_id) => {
+                if editing.target == Some(node_id) {
+                    editing.clear();
+                    runtime.last_status = "Cancelled node text edit.".into();
+                }
+            }
+            NodeAction::PreviousSetting(node_id) => {
+                graph.selected_node = Some(node_id);
+                if !graph.cycle_selected_setting(-1, &runtime.ollama_models) {
+                    runtime.last_status = "This node has no previous setting to cycle.".into();
+                }
+            }
+            NodeAction::NextSetting(node_id) => {
+                graph.selected_node = Some(node_id);
+                if !graph.cycle_selected_setting(1, &runtime.ollama_models) {
+                    runtime.last_status = "This node has no next setting to cycle.".into();
+                }
             }
         }
     }
@@ -602,6 +580,7 @@ fn handle_text_edit_input(
             }
             KeyCode::Backspace => {
                 editing.buffer.pop();
+                editing.mark_changed();
                 continue;
             }
             KeyCode::Enter | KeyCode::NumpadEnter => {
@@ -611,6 +590,7 @@ fn handle_text_edit_input(
                     return;
                 }
                 editing.buffer.push('\n');
+                editing.mark_changed();
                 continue;
             }
             KeyCode::Tab => continue,
@@ -619,6 +599,7 @@ fn handle_text_edit_input(
 
         if let Some(text) = &event.text {
             editing.buffer.push_str(text);
+            editing.mark_changed();
         }
     }
 }
@@ -673,13 +654,16 @@ fn handle_canvas_zoom(
 fn sync_node_views(
     mut commands: Commands,
     graph: Res<GraphEditorState>,
+    editing: Res<TextEditingState>,
     mut registry: ResMut<GraphUiRegistry>,
 ) {
     let Some(node_layer) = registry.node_layer else {
         return;
     };
 
-    if registry.last_graph_revision == graph.revision {
+    if registry.last_graph_revision == graph.revision
+        && registry.last_edit_revision == editing.revision
+    {
         return;
     }
 
@@ -690,6 +674,17 @@ fn sync_node_views(
     for node in &graph.nodes {
         let node_snapshot = node.clone();
         let node_id = node_snapshot.id;
+        let is_selected = graph.selected_node == Some(node_id);
+        let is_text_editing =
+            editing.target == Some(node_id) && node_snapshot.kind.editable_text().is_some();
+        let is_cycle_node = matches!(
+            node_snapshot.kind,
+            NodeKind::Model { .. }
+                | NodeKind::Temperature { .. }
+                | NodeKind::MaxTokens { .. }
+                | NodeKind::ToolChoice { .. }
+                | NodeKind::DefaultMaxTurns { .. }
+        );
 
         let root = commands
             .spawn((
@@ -699,12 +694,27 @@ fn sync_node_views(
                 BorderColor::all(Color::srgb_u8(74, 76, 82)),
                 GlobalZIndex(4),
                 UiTransform::from_scale(Vec2::splat(graph.zoom)),
+                Pickable {
+                    should_block_lower: true,
+                    is_hoverable: true,
+                },
             ))
             .observe(
-                move |mut click: On<Pointer<Click>>, mut graph: ResMut<GraphEditorState>| {
+                move |mut click: On<Pointer<Click>>,
+                      mut graph: ResMut<GraphEditorState>,
+                      mut editing: ResMut<TextEditingState>| {
                     if click.button == PointerButton::Primary {
                         click.propagate(false);
-                        graph.selected_node = Some(node_id);
+                        select_node_for_editing(&mut graph, &mut editing, node_id);
+                    }
+                },
+            )
+            .observe(
+                move |mut drag: On<Pointer<Drag>>, mut graph: ResMut<GraphEditorState>| {
+                    if drag.button == PointerButton::Primary {
+                        drag.propagate(false);
+                        let zoom = graph.zoom.max(0.001);
+                        graph.move_node(node_id, drag.delta / zoom);
                     }
                 },
             )
@@ -734,10 +744,12 @@ fn sync_node_views(
                     },
                 ))
                 .observe(
-                    move |mut click: On<Pointer<Click>>, mut graph: ResMut<GraphEditorState>| {
+                    move |mut click: On<Pointer<Click>>,
+                          mut graph: ResMut<GraphEditorState>,
+                          mut editing: ResMut<TextEditingState>| {
                         if click.button == PointerButton::Primary {
                             click.propagate(false);
-                            graph.selected_node = Some(node_id);
+                            select_node_for_editing(&mut graph, &mut editing, node_id);
                         }
                     },
                 )
@@ -745,7 +757,6 @@ fn sync_node_views(
                     move |mut drag: On<Pointer<Drag>>, mut graph: ResMut<GraphEditorState>| {
                         if drag.button == PointerButton::Primary {
                             drag.propagate(false);
-                            graph.selected_node = Some(node_id);
                             let zoom = graph.zoom.max(0.001);
                             graph.move_node(node_id, drag.delta / zoom);
                         }
@@ -758,6 +769,7 @@ fn sync_node_views(
                         ..default()
                     },
                     TextColor(Color::srgb_u8(238, 240, 243)),
+                    Pickable::IGNORE,
                 ));
 
             let inputs = node_snapshot.kind.inputs();
@@ -772,6 +784,7 @@ fn sync_node_views(
                     row_gap: Val::Px(4.0),
                     ..default()
                 })
+                .insert(Pickable::IGNORE)
                 .with_children(|ports| {
                     for row in 0..row_count {
                         ports
@@ -782,6 +795,7 @@ fn sync_node_views(
                                 justify_content: JustifyContent::SpaceBetween,
                                 ..default()
                             })
+                            .insert(Pickable::IGNORE)
                             .with_children(|row_parent| {
                                 if let Some(spec) = inputs.get(row).copied() {
                                     row_parent
@@ -791,6 +805,7 @@ fn sync_node_views(
                                             column_gap: Val::Px(8.0),
                                             ..default()
                                         })
+                                        .insert(Pickable::IGNORE)
                                         .with_children(|group| {
                                             spawn_port_button(
                                                 group,
@@ -812,13 +827,17 @@ fn sync_node_views(
                                                     ..default()
                                                 },
                                                 TextColor(Color::srgb_u8(205, 208, 214)),
+                                                Pickable::IGNORE,
                                             ));
                                         });
                                 } else {
-                                    row_parent.spawn(Node {
-                                        width: Val::Px(124.0),
-                                        ..default()
-                                    });
+                                    row_parent.spawn((
+                                        Node {
+                                            width: Val::Px(124.0),
+                                            ..default()
+                                        },
+                                        Pickable::IGNORE,
+                                    ));
                                 }
 
                                 if let Some(spec) = outputs.get(row).copied() {
@@ -829,6 +848,7 @@ fn sync_node_views(
                                             column_gap: Val::Px(8.0),
                                             ..default()
                                         })
+                                        .insert(Pickable::IGNORE)
                                         .with_children(|group| {
                                             group.spawn((
                                                 Text::new(spec.name),
@@ -837,6 +857,7 @@ fn sync_node_views(
                                                     ..default()
                                                 },
                                                 TextColor(Color::srgb_u8(205, 208, 214)),
+                                                Pickable::IGNORE,
                                             ));
                                             spawn_port_button(
                                                 group,
@@ -849,10 +870,13 @@ fn sync_node_views(
                                             );
                                         });
                                 } else {
-                                    row_parent.spawn(Node {
-                                        width: Val::Px(124.0),
-                                        ..default()
-                                    });
+                                    row_parent.spawn((
+                                        Node {
+                                            width: Val::Px(124.0),
+                                            ..default()
+                                        },
+                                        Pickable::IGNORE,
+                                    ));
                                 }
                             });
                     }
@@ -872,17 +896,115 @@ fn sync_node_views(
                         top: Color::srgb_u8(77, 79, 86),
                         ..BorderColor::DEFAULT
                     },
+                    Pickable::IGNORE,
                 ))
                 .with_children(|body| {
-                    for line in node_snapshot.kind.summary_lines() {
+                    if is_text_editing {
                         body.spawn((
-                            Text::new(line),
-                            TextFont {
-                                font_size: 13.0,
+                            Node {
+                                width: Val::Percent(100.0),
+                                padding: UiRect::all(Val::Px(8.0)),
+                                margin: UiRect::bottom(Val::Px(4.0)),
+                                min_height: Val::Px(72.0),
+                                border_radius: BorderRadius::all(Val::Px(6.0)),
                                 ..default()
                             },
-                            TextColor(Color::srgb_u8(176, 181, 190)),
-                        ));
+                            BackgroundColor(Color::srgb_u8(58, 60, 67)),
+                            Pickable::IGNORE,
+                        ))
+                        .with_children(|panel| {
+                            panel.spawn((
+                                Text::new(inline_editor_value_text(&editing)),
+                                TextFont {
+                                    font_size: 16.0,
+                                    ..default()
+                                },
+                                TextColor(Color::srgb_u8(229, 232, 238)),
+                                Pickable::IGNORE,
+                            ));
+                        });
+
+                        body.spawn((
+                            Node {
+                                width: Val::Percent(100.0),
+                                padding: UiRect::axes(Val::Px(8.0), Val::Px(6.0)),
+                                margin: UiRect::bottom(Val::Px(2.0)),
+                                flex_direction: FlexDirection::Column,
+                                row_gap: Val::Px(2.0),
+                                border_radius: BorderRadius::all(Val::Px(6.0)),
+                                ..default()
+                            },
+                            BackgroundColor(Color::srgb_u8(43, 45, 50)),
+                            Pickable::IGNORE,
+                        ))
+                        .with_children(|panel| {
+                            panel.spawn((
+                                Text::new("Editor"),
+                                TextFont {
+                                    font_size: 10.0,
+                                    ..default()
+                                },
+                                TextColor(Color::srgb_u8(132, 138, 149)),
+                                Pickable::IGNORE,
+                            ));
+                            panel.spawn((
+                                Text::new(
+                                    "Type directly into this node.\nCmd/Ctrl+Enter saves.\nEsc or Cancel discards.",
+                                ),
+                                TextFont {
+                                    font_size: 11.0,
+                                    ..default()
+                                },
+                                TextColor(Color::srgb_u8(150, 156, 167)),
+                                Pickable::IGNORE,
+                            ));
+                        });
+                    } else {
+                        for line in node_body_lines(&node_snapshot.kind, is_text_editing, &editing) {
+                            body.spawn((
+                                Text::new(line),
+                                TextFont {
+                                    font_size: 13.0,
+                                    ..default()
+                                },
+                                TextColor(Color::srgb_u8(176, 181, 190)),
+                                Pickable::IGNORE,
+                            ));
+                        }
+                    }
+
+                    if is_selected && is_text_editing {
+                        body.spawn(Node {
+                            width: Val::Percent(100.0),
+                            display: Display::Flex,
+                            column_gap: Val::Px(8.0),
+                            margin: UiRect::top(Val::Px(4.0)),
+                            ..default()
+                        })
+                        .with_children(|row| {
+                            spawn_node_action_button(row, "Save", NodeAction::SaveText(node_id));
+                            spawn_node_action_button(
+                                row,
+                                "Cancel",
+                                NodeAction::CancelText(node_id),
+                            );
+                        });
+                    } else if is_selected && is_cycle_node {
+                        body.spawn(Node {
+                            width: Val::Percent(100.0),
+                            display: Display::Flex,
+                            column_gap: Val::Px(8.0),
+                            margin: UiRect::top(Val::Px(4.0)),
+                            ..default()
+                        })
+                        .with_children(|row| {
+                            spawn_node_action_button(
+                                row,
+                                "Prev",
+                                NodeAction::PreviousSetting(node_id),
+                            );
+                            spawn_node_action_button(row, "Next", NodeAction::NextSetting(node_id));
+                        });
                     }
                 });
         });
@@ -891,6 +1013,7 @@ fn sync_node_views(
     }
 
     registry.last_graph_revision = graph.revision;
+    registry.last_edit_revision = editing.revision;
 }
 
 fn spawn_port_button(parent: &mut ChildSpawnerCommands, address: PortAddress, ty: PortType) {
@@ -908,13 +1031,15 @@ fn spawn_port_button(parent: &mut ChildSpawnerCommands, address: PortAddress, ty
             BorderColor::all(Color::BLACK),
         ))
         .observe(
-            move |mut click: On<Pointer<Click>>, mut graph: ResMut<GraphEditorState>| {
+            move |mut click: On<Pointer<Click>>,
+                  mut graph: ResMut<GraphEditorState>,
+                  mut editing: ResMut<TextEditingState>| {
                 if click.button != PointerButton::Primary {
                     return;
                 }
 
                 click.propagate(false);
-                graph.selected_node = Some(address.node);
+                select_node_for_editing(&mut graph, &mut editing, address.node);
 
                 if let Some(dragging) = graph.dragging_wire {
                     if dragging.from == address {
@@ -983,18 +1108,6 @@ fn update_sidebar_text(
     registry: Res<GraphUiRegistry>,
     mut texts: Query<&mut Text>,
 ) {
-    if let Some(entity) = registry.inspector_text {
-        if let Ok(mut text) = texts.get_mut(entity) {
-            text.0 = selection_summary(&graph, &runtime);
-        }
-    }
-
-    if let Some(entity) = registry.editor_text {
-        if let Ok(mut text) = texts.get_mut(entity) {
-            text.0 = editor_summary(&graph, &editing);
-        }
-    }
-
     if let Some(entity) = registry.status_text {
         if let Ok(mut text) = texts.get_mut(entity) {
             let pending = runtime
@@ -1006,15 +1119,22 @@ fn update_sidebar_text(
             } else {
                 "offline".into()
             };
+            let selection_status = graph
+                .selected_node
+                .and_then(|node_id| graph.node(node_id))
+                .map(|node| node.kind.title().to_string())
+                .unwrap_or_else(|| "nothing selected".into());
             let editing_status = editing
                 .target
-                .map(|node_id| format!("editing node {node_id}"))
+                .and_then(|node_id| graph.node(node_id))
+                .map(|node| format!("editing {}", node.kind.title()))
                 .unwrap_or_else(|| "not editing".into());
             text.0 = format!(
-                "Ollama: {}  •  {}  •  {}  •  nodes={} edges={}  •  zoom={:.0}%  •  {}",
+                "Ollama: {}  •  {}  •  {}  •  selected={}  •  nodes={} edges={}  •  zoom={:.0}%  •  {}",
                 runtime.ollama_endpoint,
                 model_status,
                 pending,
+                selection_status,
                 graph.nodes.len(),
                 graph.edges.len(),
                 graph.zoom * 100.0,
@@ -1238,115 +1358,54 @@ fn port_center(graph: &GraphEditorState, address: PortAddress) -> Option<Vec2> {
     Some(Vec2::new(x, y))
 }
 
-fn selection_summary(graph: &GraphEditorState, runtime: &RigEditorRuntime) -> String {
-    let Some(selected) = graph.selected_node else {
-        return format!(
-            "Nothing selected.\n\n\
-             Select a node to inspect it.\n\
-             Ollama: {}\n\
-             Models discovered: {}\n\n\
-             {}",
-            if runtime.ollama_ready {
-                "ready"
-            } else {
-                "offline"
-            },
-            runtime.ollama_models.len(),
-            runtime.ollama_detail
-        );
-    };
-    let Some(node) = graph.node(selected) else {
-        return "Nothing selected.".into();
-    };
-
-    let incoming = graph
-        .edges
-        .iter()
-        .filter(|edge| edge.to.node == selected)
-        .count();
-    let outgoing = graph
-        .edges
-        .iter()
-        .filter(|edge| edge.from.node == selected)
-        .count();
-
-    let mut lines = vec![
-        node.kind.title().to_string(),
-        format!("node id = {}", node.id),
-        format!("position = {:.0}, {:.0}", node.position.x, node.position.y),
-        format!("incoming edges = {incoming}"),
-        format!("outgoing edges = {outgoing}"),
-    ];
-
-    if matches!(node.kind, NodeKind::Agent) {
-        lines.push(String::new());
-        lines.push(agent_wiring_summary(graph, selected));
-    }
-
-    lines.push(String::new());
-    lines.push(format!(
-        "Ollama = {}",
-        if runtime.ollama_ready {
-            "ready"
+fn node_body_lines(
+    kind: &NodeKind,
+    is_text_editing: bool,
+    editing: &TextEditingState,
+) -> Vec<String> {
+    if is_text_editing {
+        let mut lines = vec![
+            "inline editor".into(),
+            "type directly here".into(),
+            "Ctrl+Enter commits".into(),
+        ];
+        if editing.buffer.trim().is_empty() {
+            lines.push("(empty)".into());
         } else {
-            "offline"
+            lines.extend(preview_multiline(&editing.buffer, 8));
         }
-    ));
-    lines.push(runtime.ollama_detail.clone());
-    lines.join("\n")
-}
-
-fn agent_wiring_summary(graph: &GraphEditorState, agent_id: NodeId) -> String {
-    let mut lines = vec!["Agent wiring".to_string()];
-    let Some(agent) = graph.node(agent_id) else {
-        return "Agent missing.".into();
-    };
-
-    for spec in agent.kind.inputs() {
-        let count = graph.input_sources(agent_id, spec.ty).len();
-        let status = if spec.required && count == 0 {
-            "missing"
-        } else if count == 0 {
-            "optional"
-        } else {
-            "connected"
-        };
-        lines.push(format!("• {}: {} ({count})", spec.name, status));
-    }
-    let outputs = graph.output_targets(agent_id, PortType::TextResponse).len();
-    lines.push(format!("• text sink: connected ({outputs})"));
-    lines.join("\n")
-}
-
-fn editor_summary(graph: &GraphEditorState, editing: &TextEditingState) -> String {
-    if let Some(target) = editing.target {
-        let title = graph
-            .node_kind(target)
-            .map(NodeKind::title)
-            .unwrap_or("Unknown");
-        return format!(
-            "Editing {}\n\nEnter = newline\nCtrl+Enter = commit\nEsc or Cancel Edit = cancel\n\n{}",
-            title, editing.buffer
-        );
+        return lines;
     }
 
-    let Some(selected) = graph.selected_node else {
-        return "Select a node. Text fields can be edited here; model and numeric nodes use Prev/Next Setting.".into();
-    };
-    let Some(kind) = graph.node_kind(selected) else {
-        return "Select a node.".into();
-    };
+    kind.summary_lines()
+}
 
-    if let Some(text) = kind.editable_text() {
-        format!(
-            "Selected text field\n\nClick Edit Selected to modify this node.\n\n{}",
-            text
-        )
+fn inline_editor_value_text(editing: &TextEditingState) -> String {
+    if editing.buffer.trim().is_empty() {
+        "(empty)".into()
     } else {
-        format!(
-            "{} is not directly text-editable.\n\nUse Prev/Next Setting for model selection, tool choice, temperature, max tokens, or max turns.",
-            kind.title()
-        )
+        preview_multiline(&editing.buffer, 10).join("\n")
+    }
+}
+
+fn preview_multiline(value: &str, max_lines: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    for line in value.lines().take(max_lines) {
+        lines.push(truncate_preview(line, 56));
+    }
+    if value.lines().count() > max_lines {
+        lines.push("…".into());
+    }
+    lines
+}
+
+fn truncate_preview(value: &str, max_chars: usize) -> String {
+    let trimmed = value.trim_end();
+    if trimmed.chars().count() > max_chars {
+        let preview: String = trimmed.chars().take(max_chars).collect();
+        format!("{preview}…")
+    } else {
+        trimmed.to_string()
     }
 }
 

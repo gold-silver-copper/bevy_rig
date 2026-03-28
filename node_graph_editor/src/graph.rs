@@ -862,11 +862,6 @@ impl GraphEditorState {
             .collect()
     }
 
-    pub fn selected_text_value(&self) -> Option<&str> {
-        let selected = self.selected_node?;
-        self.node_kind(selected)?.editable_text()
-    }
-
     pub fn set_node_text_value(&mut self, node_id: NodeId, value: String) -> bool {
         let changed = self
             .nodes
