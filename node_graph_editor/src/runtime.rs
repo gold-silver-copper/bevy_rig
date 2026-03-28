@@ -9,6 +9,7 @@ use schemars::Schema;
 use serde::Deserialize;
 use serde_json::Value;
 use tokio::runtime::Runtime;
+use tokio::task::JoinHandle;
 
 use crate::graph::{GraphEditorState, NodeId, NodeKind, PortType, ToolChoiceSetting};
 
@@ -34,8 +35,10 @@ pub struct RigEditorRuntime {
     pub ollama_detail: String,
     pub ollama_models: Vec<String>,
     pub pending_request: Option<u64>,
+    pub pending_output_node: Option<NodeId>,
     pub last_status: String,
     next_request_id: u64,
+    pending_task: Option<JoinHandle<()>>,
 }
 
 impl Default for RigEditorRuntime {
@@ -56,8 +59,10 @@ impl Default for RigEditorRuntime {
             ollama_detail: "discovering local models".into(),
             ollama_models: Vec::new(),
             pending_request: None,
+            pending_output_node: None,
             last_status: "Local Ollama discovery pending.".into(),
             next_request_id: 1,
+            pending_task: None,
         }
     }
 }
@@ -99,6 +104,7 @@ impl RigEditorRuntime {
         let request_id = self.next_request_id;
         self.next_request_id += 1;
         self.pending_request = Some(request_id);
+        self.pending_output_node = Some(request.output_node);
         self.last_status = format!(
             "Running {} on Ollama / {} …",
             request.agent_name.as_deref().unwrap_or("selected agent"),
@@ -107,7 +113,7 @@ impl RigEditorRuntime {
 
         let tx = self.tx.clone();
         let runtime = self.runtime.clone();
-        runtime.spawn(async move {
+        let handle = runtime.spawn(async move {
             let result = execute_ollama_request(request_id, request).await;
             let message = match result {
                 Ok(message) => message,
@@ -119,8 +125,23 @@ impl RigEditorRuntime {
             };
             let _ = tx.send(message);
         });
+        self.pending_task = Some(handle);
 
         Ok(())
+    }
+
+    pub fn stop_run(&mut self) -> Option<NodeId> {
+        if let Some(handle) = self.pending_task.take() {
+            handle.abort();
+        }
+
+        let request = self.pending_request.take();
+        let output_node = self.pending_output_node.take();
+        self.last_status = match request {
+            Some(request_id) => format!("Run #{request_id} stopped."),
+            None => "No graph run is in flight.".into(),
+        };
+        output_node
     }
 }
 
@@ -200,6 +221,8 @@ fn poll_runtime_messages(
                 status,
             } => {
                 runtime.pending_request = None;
+                runtime.pending_output_node = None;
+                runtime.pending_task = None;
                 runtime.last_status = format!("Run #{request_id} finished.");
                 graph.set_output_result(output_node, text, status);
             }
@@ -209,6 +232,8 @@ fn poll_runtime_messages(
                 error,
             } => {
                 runtime.pending_request = None;
+                runtime.pending_output_node = None;
+                runtime.pending_task = None;
                 runtime.last_status = format!("Run #{request_id} failed: {error}");
                 if let Some(output_node) = output_node {
                     graph.set_output_result(output_node, error.clone(), "failed".into());
@@ -233,6 +258,14 @@ pub fn compile_selected_agent_run(
         })
         .ok_or_else(|| anyhow!("select an Agent node before running the graph"))?;
 
+    compile_agent_run(graph, runtime, agent_id)
+}
+
+pub fn compile_agent_run(
+    graph: &GraphEditorState,
+    runtime: &RigEditorRuntime,
+    agent_id: NodeId,
+) -> Result<CompiledAgentRun> {
     let output_node = graph
         .output_targets(agent_id, PortType::TextResponse)
         .into_iter()

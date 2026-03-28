@@ -722,6 +722,32 @@ impl GraphEditorState {
         id
     }
 
+    pub fn duplicate_node(&mut self, node_id: NodeId, offset: Vec2) -> Option<NodeId> {
+        let node = self.node(node_id)?.clone();
+        let new_id = self.add_node(node.kind, node.position + offset);
+        self.selected_node = Some(new_id);
+        Some(new_id)
+    }
+
+    pub fn remove_node(&mut self, node_id: NodeId) -> bool {
+        let original_len = self.nodes.len();
+        self.nodes.retain(|node| node.id != node_id);
+        if self.nodes.len() == original_len {
+            return false;
+        }
+
+        self.edges
+            .retain(|edge| edge.from.node != node_id && edge.to.node != node_id);
+        if self.selected_node == Some(node_id) {
+            self.selected_node = None;
+        }
+        if matches!(self.dragging_wire, Some(DraggingWire { from, .. }) if from.node == node_id) {
+            self.dragging_wire = None;
+        }
+        self.touch();
+        true
+    }
+
     pub fn touch(&mut self) {
         self.revision = self.revision.wrapping_add(1);
     }
@@ -967,6 +993,22 @@ impl GraphEditorState {
             *current_text = text;
             *current_status = status;
             self.touch();
+        }
+    }
+
+    pub fn clear_output(&mut self, node_id: NodeId) -> bool {
+        if let Some(NodeKind::TextOutput { text, status, .. }) = self
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == node_id)
+            .map(|node| &mut node.kind)
+        {
+            *text = "Run the selected agent to populate this sink.".into();
+            *status = "idle".into();
+            self.touch();
+            true
+        } else {
+            false
         }
     }
 }

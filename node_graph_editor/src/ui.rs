@@ -17,10 +17,11 @@ use crate::{
         DraggingWire, GraphEditorState, GraphNode, NodeId, NodeKind, NodeTemplate, PortAddress,
         PortDirection, PortType,
     },
-    runtime::{RigEditorRuntime, compile_selected_agent_run},
+    runtime::{RigEditorRuntime, compile_agent_run, compile_selected_agent_run},
 };
 
-const SIDEBAR_WIDTH: f32 = 340.0;
+const SIDEBAR_WIDTH: f32 = 220.0;
+const INSPECTOR_WIDTH: f32 = 320.0;
 const TOOLBAR_HEIGHT: f32 = 58.0;
 const NODE_WIDTH: f32 = 340.0;
 const NODE_HEADER_HEIGHT: f32 = 34.0;
@@ -38,17 +39,21 @@ impl Plugin for NodeGraphEditorPlugin {
         app.init_resource::<GraphEditorState>()
             .init_resource::<GraphUiRegistry>()
             .init_resource::<TextEditingState>()
+            .init_resource::<NodePaletteState>()
             .add_systems(Startup, setup_editor_ui)
             .add_systems(
                 Update,
                 (
+                    handle_palette_shortcuts,
                     handle_editor_buttons,
+                    handle_palette_buttons,
                     handle_node_buttons,
                     handle_text_edit_input,
                     handle_canvas_zoom,
                     sync_node_views,
+                    sync_palette_view,
                     update_node_view_state,
-                    update_sidebar_text,
+                    update_chrome_text,
                     rebuild_canvas_overlay,
                 ),
             );
@@ -61,10 +66,15 @@ struct GraphUiRegistry {
     overlay_layer: Option<Entity>,
     node_layer: Option<Entity>,
     status_text: Option<Entity>,
+    inspector_title_text: Option<Entity>,
+    inspector_body_text: Option<Entity>,
+    palette_parent: Option<Entity>,
+    palette_view: Option<Entity>,
     node_views: HashMap<NodeId, Entity>,
     overlay_entities: Vec<Entity>,
     last_graph_revision: u64,
     last_edit_revision: u64,
+    last_palette_revision: u64,
 }
 
 #[derive(Resource, Default)]
@@ -95,6 +105,37 @@ impl TextEditingState {
     }
 }
 
+#[derive(Resource, Default)]
+struct NodePaletteState {
+    visible: bool,
+    search: String,
+    screen_position: Vec2,
+    spawn_world: Vec2,
+    revision: u64,
+}
+
+impl NodePaletteState {
+    fn open(&mut self, screen_position: Vec2, spawn_world: Vec2) {
+        self.visible = true;
+        self.search.clear();
+        self.screen_position = screen_position;
+        self.spawn_world = spawn_world;
+        self.revision = self.revision.wrapping_add(1);
+    }
+
+    fn close(&mut self) {
+        if self.visible || !self.search.is_empty() {
+            self.visible = false;
+            self.search.clear();
+            self.revision = self.revision.wrapping_add(1);
+        }
+    }
+
+    fn mark_changed(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
+    }
+}
+
 #[derive(Component)]
 struct CanvasSurface;
 
@@ -111,12 +152,20 @@ struct NodeHeaderView {
 #[derive(Component)]
 struct ToolbarStatusText;
 
+#[derive(Component)]
+struct InspectorTitleText;
+
+#[derive(Component)]
+struct InspectorBodyText;
+
 #[derive(Component, Clone, Copy)]
 enum EditorAction {
     ResetDemo,
     RunSelectedAgent,
-    RefreshOllama,
-    AddNode(NodeTemplate),
+    StopRun,
+    OpenNodePalette,
+    FrameSelected,
+    FrameGraph,
 }
 
 #[derive(Component)]
@@ -128,10 +177,18 @@ enum NodeAction {
     CancelText(NodeId),
     PreviousSetting(NodeId),
     NextSetting(NodeId),
+    RefreshModels(NodeId),
+    RunAgent(NodeId),
+    ClearOutput(NodeId),
+    DuplicateNode(NodeId),
+    DeleteNode(NodeId),
 }
 
 #[derive(Component)]
 struct NodeActionButton(NodeAction);
+
+#[derive(Component, Clone, Copy)]
+struct PaletteButton(NodeTemplate);
 
 fn select_node_for_editing(
     graph: &mut GraphEditorState,
@@ -169,7 +226,8 @@ fn setup_editor_ui(mut commands: Commands, mut registry: ResMut<GraphUiRegistry>
                 height: Val::Percent(100.0),
                 padding: UiRect::all(Val::Px(16.0)),
                 flex_direction: FlexDirection::Column,
-                row_gap: Val::Px(12.0),
+                justify_content: JustifyContent::SpaceBetween,
+                row_gap: Val::Px(16.0),
                 border: UiRect::right(Val::Px(1.0)),
                 ..default()
             },
@@ -183,80 +241,68 @@ fn setup_editor_ui(mut commands: Commands, mut registry: ResMut<GraphUiRegistry>
     commands.entity(root).add_child(sidebar);
 
     commands.entity(sidebar).with_children(|parent| {
-        parent.spawn((
-            Text::new("Bevy Rig Graph"),
-            TextFont {
-                font_size: 28.0,
+        parent
+            .spawn(Node {
+                width: Val::Percent(100.0),
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(14.0),
                 ..default()
-            },
-            TextColor(Color::srgb_u8(236, 238, 241)),
-        ));
+            })
+            .with_children(|top| {
+                top.spawn((
+                    Text::new("Bevy Rig Graph"),
+                    TextFont {
+                        font_size: 26.0,
+                        ..default()
+                    },
+                    TextColor(Color::srgb_u8(236, 238, 241)),
+                ));
 
-        parent.spawn((
-            Text::new("Compose an agent from individual Rig field nodes, target a local Ollama model, and route the response into a text sink."),
-            TextFont {
-                font_size: 14.0,
-                ..default()
-            },
-            TextColor(Color::srgb_u8(170, 175, 184)),
-        ));
+                top.spawn((
+                    Text::new(
+                        "Canvas-first LLM graph editor.\nRight-click or press Space to add nodes.",
+                    ),
+                    TextFont {
+                        font_size: 14.0,
+                        ..default()
+                    },
+                    TextColor(Color::srgb_u8(170, 175, 184)),
+                ));
+
+                top.spawn((
+                    Text::new(
+                        "Shortcuts\n\
+                         • Space / Tab: open node palette\n\
+                         • Right-click canvas: add near cursor\n\
+                         • Cmd/Ctrl + wheel: zoom\n\
+                         • Middle-drag: pan",
+                    ),
+                    TextFont {
+                        font_size: 12.0,
+                        ..default()
+                    },
+                    TextColor(Color::srgb_u8(145, 150, 158)),
+                ));
+            });
 
         parent
             .spawn(Node {
                 width: Val::Percent(100.0),
-                display: Display::Flex,
-                flex_wrap: FlexWrap::Wrap,
-                column_gap: Val::Px(8.0),
+                flex_direction: FlexDirection::Column,
                 row_gap: Val::Px(8.0),
                 ..default()
             })
-            .with_children(|row| {
-                spawn_editor_button(row, "Run Selected Agent", EditorAction::RunSelectedAgent, 48.0);
-                spawn_editor_button(row, "Refresh Ollama", EditorAction::RefreshOllama, 48.0);
-                spawn_editor_button(row, "Reset Demo", EditorAction::ResetDemo, 48.0);
+            .with_children(|bottom| {
+                bottom.spawn((
+                    Text::new("Graph-level actions live in the top bar. Edit values directly on nodes; inspect wiring on the right."),
+                    TextFont {
+                        font_size: 12.0,
+                        ..default()
+                    },
+                    TextColor(Color::srgb_u8(136, 142, 151)),
+                ));
+                spawn_editor_button(bottom, "Reset Demo", EditorAction::ResetDemo, 100.0);
             });
-
-        parent.spawn((
-            Text::new("Add nodes"),
-            TextFont {
-                font_size: 16.0,
-                ..default()
-            },
-            TextColor(Color::srgb_u8(230, 231, 235)),
-        ));
-
-        parent
-            .spawn(Node {
-                width: Val::Percent(100.0),
-                display: Display::Flex,
-                flex_wrap: FlexWrap::Wrap,
-                column_gap: Val::Px(8.0),
-                row_gap: Val::Px(8.0),
-                ..default()
-            })
-            .with_children(|grid| {
-                for template in NodeTemplate::ALL {
-                    spawn_editor_button(grid, template.label(), EditorAction::AddNode(template), 48.0);
-                }
-            });
-
-        parent.spawn((
-            Text::new(
-                "Controls\n\
-                 • Left-drag node headers to move them\n\
-                 • Middle-drag the canvas to pan\n\
-                 • Cmd/Ctrl + scroll to zoom the canvas\n\
-                 • Click one port, then another compatible port to connect\n\
-                 • Select a text node and type directly inside it\n\
-                 • Save or cancel edits on the node itself\n\
-                 • Run the selected Agent node to produce Text Output",
-            ),
-            TextFont {
-                font_size: 13.0,
-                ..default()
-            },
-            TextColor(Color::srgb_u8(155, 160, 168)),
-        ));
     });
 
     let main = commands
@@ -272,7 +318,29 @@ fn setup_editor_ui(mut commands: Commands, mut registry: ResMut<GraphUiRegistry>
         .id();
     commands.entity(root).add_child(main);
 
+    let inspector = commands
+        .spawn((
+            Node {
+                width: Val::Px(INSPECTOR_WIDTH),
+                height: Val::Percent(100.0),
+                padding: UiRect::all(Val::Px(16.0)),
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(12.0),
+                border: UiRect::left(Val::Px(1.0)),
+                ..default()
+            },
+            BackgroundColor(Color::srgb_u8(24, 25, 28)),
+            BorderColor {
+                left: Color::srgb_u8(48, 50, 56),
+                ..BorderColor::DEFAULT
+            },
+        ))
+        .id();
+    commands.entity(root).add_child(inspector);
+
     let mut status_text = None;
+    let mut inspector_title_text = None;
+    let mut inspector_body_text = None;
     let toolbar = commands
         .spawn((
             Node {
@@ -282,6 +350,7 @@ fn setup_editor_ui(mut commands: Commands, mut registry: ResMut<GraphUiRegistry>
                 justify_content: JustifyContent::SpaceBetween,
                 padding: UiRect::axes(Val::Px(18.0), Val::Px(12.0)),
                 border: UiRect::bottom(Val::Px(1.0)),
+                column_gap: Val::Px(12.0),
                 ..default()
             },
             BackgroundColor(Color::srgb_u8(25, 26, 29)),
@@ -294,14 +363,20 @@ fn setup_editor_ui(mut commands: Commands, mut registry: ResMut<GraphUiRegistry>
     commands.entity(main).add_child(toolbar);
 
     commands.entity(toolbar).with_children(|parent| {
-        parent.spawn((
-            Text::new("Node canvas"),
-            TextFont {
-                font_size: 18.0,
+        parent
+            .spawn(Node {
+                display: Display::Flex,
+                align_items: AlignItems::Center,
+                column_gap: Val::Px(8.0),
                 ..default()
-            },
-            TextColor(Color::srgb_u8(236, 238, 241)),
-        ));
+            })
+            .with_children(|row| {
+                spawn_editor_button(row, "Run", EditorAction::RunSelectedAgent, 0.0);
+                spawn_editor_button(row, "Stop", EditorAction::StopRun, 0.0);
+                spawn_editor_button(row, "Add Node", EditorAction::OpenNodePalette, 0.0);
+                spawn_editor_button(row, "Frame Selected", EditorAction::FrameSelected, 0.0);
+                spawn_editor_button(row, "Frame Graph", EditorAction::FrameGraph, 0.0);
+            });
         status_text = Some(
             parent
                 .spawn((
@@ -317,44 +392,90 @@ fn setup_editor_ui(mut commands: Commands, mut registry: ResMut<GraphUiRegistry>
         );
     });
 
-    let canvas = commands
-        .spawn((
-            Node {
-                width: Val::Percent(100.0),
-                height: Val::Percent(100.0),
-                position_type: PositionType::Relative,
-                overflow: Overflow::clip(),
-                ..default()
-            },
-            CanvasSurface,
-            RelativeCursorPosition::default(),
-            Pickable {
-                should_block_lower: false,
-                is_hoverable: true,
-            },
-            BackgroundColor(Color::srgb_u8(24, 25, 29)),
-        ))
-        .observe(
-            |mut click: On<Pointer<Click>>,
-             mut graph: ResMut<GraphEditorState>,
-             mut editing: ResMut<TextEditingState>| {
-                if click.button == PointerButton::Primary {
-                    click.propagate(false);
-                    graph.selected_node = None;
-                    graph.dragging_wire = None;
-                    editing.clear();
-                }
-            },
-        )
-        .observe(
-            |mut drag: On<Pointer<Drag>>, mut graph: ResMut<GraphEditorState>| {
-                if drag.button == PointerButton::Middle {
-                    drag.propagate(false);
-                    graph.pan += drag.delta;
-                }
-            },
-        )
-        .id();
+    commands.entity(inspector).with_children(|parent| {
+        inspector_title_text = Some(
+            parent
+                .spawn((
+                    Text::new("Inspector"),
+                    TextFont {
+                        font_size: 18.0,
+                        ..default()
+                    },
+                    TextColor(Color::srgb_u8(236, 238, 241)),
+                    InspectorTitleText,
+                ))
+                .id(),
+        );
+        inspector_body_text = Some(
+            parent
+                .spawn((
+                    Text::new("Select a node to inspect its wiring and runtime state."),
+                    TextFont {
+                        font_size: 13.0,
+                        ..default()
+                    },
+                    TextColor(Color::srgb_u8(170, 175, 184)),
+                    InspectorBodyText,
+                ))
+                .id(),
+        );
+    });
+
+    let canvas =
+        commands
+            .spawn((
+                Node {
+                    width: Val::Percent(100.0),
+                    height: Val::Percent(100.0),
+                    position_type: PositionType::Relative,
+                    overflow: Overflow::clip(),
+                    ..default()
+                },
+                CanvasSurface,
+                RelativeCursorPosition::default(),
+                Pickable {
+                    should_block_lower: false,
+                    is_hoverable: true,
+                },
+                BackgroundColor(Color::srgb_u8(24, 25, 29)),
+            ))
+            .observe(
+                |mut click: On<Pointer<Click>>,
+                 mut graph: ResMut<GraphEditorState>,
+                 mut editing: ResMut<TextEditingState>,
+                 mut palette: ResMut<NodePaletteState>,
+                 canvas_query: Query<
+                    (&ComputedNode, &RelativeCursorPosition),
+                    With<CanvasSurface>,
+                >| {
+                    if click.button == PointerButton::Primary {
+                        click.propagate(false);
+                        graph.selected_node = None;
+                        graph.dragging_wire = None;
+                        editing.clear();
+                        palette.close();
+                    } else if click.button == PointerButton::Secondary {
+                        click.propagate(false);
+                        if let Ok((canvas_node, cursor)) = canvas_query.single() {
+                            let canvas_size = canvas_node.size();
+                            let normalized = cursor.normalized.unwrap_or(Vec2::ZERO);
+                            let screen_position = ((normalized + Vec2::splat(0.5)) * canvas_size)
+                                .clamp(Vec2::ZERO, canvas_size);
+                            let spawn_world = (screen_position - graph.pan) / graph.zoom.max(0.001);
+                            palette.open(screen_position, spawn_world);
+                        }
+                    }
+                },
+            )
+            .observe(
+                |mut drag: On<Pointer<Drag>>, mut graph: ResMut<GraphEditorState>| {
+                    if drag.button == PointerButton::Middle {
+                        drag.propagate(false);
+                        graph.pan += drag.delta;
+                    }
+                },
+            )
+            .id();
     commands.entity(main).add_child(canvas);
 
     let overlay_layer = commands
@@ -387,6 +508,9 @@ fn setup_editor_ui(mut commands: Commands, mut registry: ResMut<GraphUiRegistry>
     registry.overlay_layer = Some(overlay_layer);
     registry.node_layer = Some(node_layer);
     registry.status_text = status_text;
+    registry.inspector_title_text = inspector_title_text;
+    registry.inspector_body_text = inspector_body_text;
+    registry.palette_parent = Some(canvas);
 }
 
 fn spawn_editor_button(
@@ -399,7 +523,11 @@ fn spawn_editor_button(
         .spawn((
             Button,
             Node {
-                width: Val::Percent(width_percent),
+                width: if width_percent > 0.0 {
+                    Val::Percent(width_percent)
+                } else {
+                    Val::Auto
+                },
                 min_height: Val::Px(34.0),
                 align_items: AlignItems::Center,
                 justify_content: JustifyContent::Center,
@@ -412,6 +540,9 @@ fn spawn_editor_button(
             BackgroundColor(button_background(Interaction::None)),
             BorderColor::all(Color::srgb_u8(62, 64, 70)),
         ))
+        .observe(|mut click: On<Pointer<Click>>| {
+            click.propagate(false);
+        })
         .with_child((
             Text::new(label),
             TextFont {
@@ -440,6 +571,9 @@ fn spawn_node_action_button(parent: &mut ChildSpawnerCommands, label: &str, acti
             BackgroundColor(button_background(Interaction::None)),
             BorderColor::all(Color::srgb_u8(62, 64, 70)),
         ))
+        .observe(|mut click: On<Pointer<Click>>| {
+            click.propagate(false);
+        })
         .with_child((
             Text::new(label),
             TextFont {
@@ -450,10 +584,43 @@ fn spawn_node_action_button(parent: &mut ChildSpawnerCommands, label: &str, acti
         ));
 }
 
+fn spawn_palette_button(parent: &mut ChildSpawnerCommands, label: &str, template: NodeTemplate) {
+    parent
+        .spawn((
+            Button,
+            Node {
+                width: Val::Percent(100.0),
+                min_height: Val::Px(30.0),
+                align_items: AlignItems::Center,
+                padding: UiRect::axes(Val::Px(10.0), Val::Px(6.0)),
+                border: UiRect::all(Val::Px(1.0)),
+                border_radius: BorderRadius::all(Val::Px(8.0)),
+                ..default()
+            },
+            PaletteButton(template),
+            BackgroundColor(button_background(Interaction::None)),
+            BorderColor::all(Color::srgb_u8(62, 64, 70)),
+        ))
+        .observe(|mut click: On<Pointer<Click>>| {
+            click.propagate(false);
+        })
+        .with_child((
+            Text::new(label),
+            TextFont {
+                font_size: 13.0,
+                ..default()
+            },
+            TextColor(Color::srgb_u8(232, 234, 238)),
+            Pickable::IGNORE,
+        ));
+}
+
 fn handle_editor_buttons(
     mut graph: ResMut<GraphEditorState>,
     mut runtime: ResMut<RigEditorRuntime>,
     mut editing: ResMut<TextEditingState>,
+    mut palette: ResMut<NodePaletteState>,
+    canvas_query: Query<&ComputedNode, With<CanvasSurface>>,
     mut interactions: Query<
         (&Interaction, &EditorButton, &mut BackgroundColor),
         Changed<Interaction>,
@@ -469,6 +636,7 @@ fn handle_editor_buttons(
             EditorAction::ResetDemo => {
                 graph.reset_demo();
                 editing.clear();
+                palette.close();
                 runtime.last_status = "Graph reset to the default Ollama agent flow.".into();
             }
             EditorAction::RunSelectedAgent => match compile_selected_agent_run(&graph, &runtime) {
@@ -490,20 +658,54 @@ fn handle_editor_buttons(
                 }
                 Err(error) => runtime.last_status = error.to_string(),
             },
-            EditorAction::RefreshOllama => runtime.request_model_refresh(),
-            EditorAction::AddNode(template) => {
-                let slot = graph.nodes.len() as f32;
-                let spawn = graph
-                    .selected_node
-                    .and_then(|node_id| graph.node(node_id))
-                    .map(|node| node.position + Vec2::new(420.0, 24.0))
-                    .unwrap_or_else(|| {
-                        Vec2::new(
-                            (180.0 - graph.pan.x + (slot.rem_euclid(3.0) * 36.0)) / graph.zoom,
-                            (120.0 - graph.pan.y + ((slot / 3.0).floor() * 28.0)) / graph.zoom,
-                        )
-                    });
-                graph.add_node(template.instantiate(), spawn);
+            EditorAction::StopRun => {
+                if let Some(output_node) = runtime.stop_run() {
+                    graph.set_output_result(output_node, "Run stopped.".into(), "stopped".into());
+                }
+            }
+            EditorAction::OpenNodePalette => {
+                if let Ok(canvas) = canvas_query.single() {
+                    let center = canvas.size() * 0.5;
+                    let spawn = (center - graph.pan) / graph.zoom.max(0.001);
+                    palette.open(center, spawn);
+                }
+            }
+            EditorAction::FrameSelected => {
+                if let Ok(canvas) = canvas_query.single() {
+                    if let Some(node_id) = graph.selected_node {
+                        if let Some(node) = graph.node(node_id) {
+                            graph.pan = canvas.size() * 0.5
+                                - (node.position + Vec2::new(NODE_WIDTH * 0.5, 120.0))
+                                    * graph.zoom.max(0.001);
+                        } else {
+                            runtime.last_status = "Select a node to frame it.".into();
+                        }
+                    } else {
+                        runtime.last_status = "Select a node to frame it.".into();
+                    }
+                }
+            }
+            EditorAction::FrameGraph => {
+                if let Ok(canvas) = canvas_query.single() {
+                    if graph.nodes.is_empty() {
+                        runtime.last_status = "Graph is empty.".into();
+                        continue;
+                    }
+                    let mut min = Vec2::splat(f32::INFINITY);
+                    let mut max = Vec2::splat(f32::NEG_INFINITY);
+                    for node in &graph.nodes {
+                        min = min.min(node.position);
+                        max = max.max(node.position + Vec2::new(NODE_WIDTH, 220.0));
+                    }
+                    let bounds = (max - min).max(Vec2::splat(1.0));
+                    let padding = Vec2::splat(96.0);
+                    let available = (canvas.size() - padding).max(Vec2::splat(200.0));
+                    let fit = (available.x / bounds.x)
+                        .min(available.y / bounds.y)
+                        .clamp(0.45, 1.4);
+                    graph.zoom = fit;
+                    graph.pan = canvas.size() * 0.5 - (min + bounds * 0.5) * graph.zoom;
+                }
             }
         }
     }
@@ -513,6 +715,7 @@ fn handle_node_buttons(
     mut graph: ResMut<GraphEditorState>,
     mut runtime: ResMut<RigEditorRuntime>,
     mut editing: ResMut<TextEditingState>,
+    mut palette: ResMut<NodePaletteState>,
     mut interactions: Query<
         (&Interaction, &NodeActionButton, &mut BackgroundColor),
         Changed<Interaction>,
@@ -551,6 +754,66 @@ fn handle_node_buttons(
                 graph.selected_node = Some(node_id);
                 if !graph.cycle_selected_setting(1, &runtime.ollama_models) {
                     runtime.last_status = "This node has no next setting to cycle.".into();
+                }
+            }
+            NodeAction::RefreshModels(node_id) => {
+                graph.selected_node = Some(node_id);
+                runtime.request_model_refresh();
+            }
+            NodeAction::RunAgent(node_id) => {
+                graph.selected_node = Some(node_id);
+                match compile_agent_run(&graph, &runtime, node_id) {
+                    Ok(request) => {
+                        let output_node = request.output_node;
+                        let model = request.model.clone();
+                        let agent_label = request
+                            .agent_name
+                            .clone()
+                            .unwrap_or_else(|| format!("agent#{}", request.agent_id));
+                        graph.set_output_result(
+                            output_node,
+                            "Running selected graph…".into(),
+                            format!("queued via Ollama / {model} as {agent_label}"),
+                        );
+                        if let Err(error) = runtime.request_run(request) {
+                            runtime.last_status = error.to_string();
+                        }
+                    }
+                    Err(error) => runtime.last_status = error.to_string(),
+                }
+            }
+            NodeAction::ClearOutput(node_id) => {
+                if graph.clear_output(node_id) {
+                    runtime.last_status = "Cleared text output.".into();
+                }
+            }
+            NodeAction::DuplicateNode(node_id) => {
+                graph.selected_node = Some(node_id);
+                if graph
+                    .duplicate_node(node_id, Vec2::new(36.0, 36.0))
+                    .is_some()
+                {
+                    if let Some(selected) = graph.selected_node {
+                        if let Some(value) =
+                            graph.node_kind(selected).and_then(NodeKind::editable_text)
+                        {
+                            editing.begin_if_needed(selected, value);
+                        } else {
+                            editing.clear();
+                        }
+                    }
+                    palette.close();
+                    runtime.last_status = "Duplicated node.".into();
+                }
+            }
+            NodeAction::DeleteNode(node_id) => {
+                let was_editing = editing.target == Some(node_id);
+                if graph.remove_node(node_id) {
+                    if was_editing {
+                        editing.clear();
+                    }
+                    palette.close();
+                    runtime.last_status = "Deleted node.".into();
                 }
             }
         }
@@ -651,6 +914,213 @@ fn handle_canvas_zoom(
     graph.pan = pointer_screen - world_at_pointer * new_zoom;
 }
 
+fn handle_palette_shortcuts(
+    mut key_events: MessageReader<KeyboardInput>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut graph: ResMut<GraphEditorState>,
+    mut editing: ResMut<TextEditingState>,
+    mut palette: ResMut<NodePaletteState>,
+    canvas_query: Query<&ComputedNode, With<CanvasSurface>>,
+) {
+    if editing.target.is_some() {
+        return;
+    }
+
+    let ctrl_pressed = keys.pressed(KeyCode::ControlLeft)
+        || keys.pressed(KeyCode::ControlRight)
+        || keys.pressed(KeyCode::SuperLeft)
+        || keys.pressed(KeyCode::SuperRight);
+
+    for event in key_events.read() {
+        if event.state != ButtonState::Pressed {
+            continue;
+        }
+
+        if !palette.visible {
+            match event.key_code {
+                KeyCode::Space | KeyCode::Tab => {
+                    if let Ok(canvas) = canvas_query.single() {
+                        let center = canvas.size() * 0.5;
+                        let spawn = (center - graph.pan) / graph.zoom.max(0.001);
+                        palette.open(center, spawn);
+                    }
+                    continue;
+                }
+                _ => continue,
+            }
+        }
+
+        match event.key_code {
+            KeyCode::Escape => {
+                palette.close();
+                return;
+            }
+            KeyCode::Backspace => {
+                palette.search.pop();
+                palette.mark_changed();
+                continue;
+            }
+            KeyCode::Enter | KeyCode::NumpadEnter => {
+                if let Some(template) = filtered_node_templates(&palette.search).first().copied() {
+                    let node_id = graph.add_node(template.instantiate(), palette.spawn_world);
+                    select_node_for_editing(&mut graph, &mut editing, node_id);
+                    palette.close();
+                }
+                return;
+            }
+            KeyCode::Tab => continue,
+            _ => {}
+        }
+
+        if ctrl_pressed {
+            continue;
+        }
+
+        if let Some(text) = &event.text {
+            if !text.chars().all(char::is_control) {
+                palette.search.push_str(text);
+                palette.mark_changed();
+            }
+        }
+    }
+}
+
+fn handle_palette_buttons(
+    mut graph: ResMut<GraphEditorState>,
+    mut editing: ResMut<TextEditingState>,
+    mut palette: ResMut<NodePaletteState>,
+    mut interactions: Query<
+        (&Interaction, &PaletteButton, &mut BackgroundColor),
+        Changed<Interaction>,
+    >,
+) {
+    for (interaction, button, mut background) in &mut interactions {
+        background.0 = button_background(*interaction);
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+
+        let node_id = graph.add_node(button.0.instantiate(), palette.spawn_world);
+        select_node_for_editing(&mut graph, &mut editing, node_id);
+        palette.close();
+    }
+}
+
+fn sync_palette_view(
+    mut commands: Commands,
+    palette: Res<NodePaletteState>,
+    mut registry: ResMut<GraphUiRegistry>,
+) {
+    if registry.last_palette_revision == palette.revision {
+        return;
+    }
+
+    if let Some(entity) = registry.palette_view.take() {
+        commands.entity(entity).despawn();
+    }
+
+    if palette.visible {
+        let Some(parent) = registry.palette_parent else {
+            return;
+        };
+
+        let panel = commands
+            .spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Px(palette.screen_position.x.clamp(18.0, 780.0)),
+                    top: Val::Px(palette.screen_position.y.clamp(18.0, 520.0)),
+                    width: Val::Px(248.0),
+                    padding: UiRect::all(Val::Px(12.0)),
+                    flex_direction: FlexDirection::Column,
+                    row_gap: Val::Px(8.0),
+                    border: UiRect::all(Val::Px(1.0)),
+                    border_radius: BorderRadius::all(Val::Px(12.0)),
+                    ..default()
+                },
+                BackgroundColor(Color::srgb_u8(28, 29, 33)),
+                BorderColor::all(Color::srgb_u8(66, 69, 76)),
+                GlobalZIndex(40),
+            ))
+            .observe(|mut click: On<Pointer<Click>>| {
+                click.propagate(false);
+            })
+            .with_children(|parent| {
+                parent.spawn((
+                    Text::new("Add Node"),
+                    TextFont {
+                        font_size: 16.0,
+                        ..default()
+                    },
+                    TextColor(Color::srgb_u8(236, 238, 241)),
+                    Pickable::IGNORE,
+                ));
+                parent
+                    .spawn((
+                        Node {
+                            width: Val::Percent(100.0),
+                            padding: UiRect::axes(Val::Px(10.0), Val::Px(8.0)),
+                            border_radius: BorderRadius::all(Val::Px(8.0)),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgb_u8(42, 44, 49)),
+                        Pickable::IGNORE,
+                    ))
+                    .with_children(|field| {
+                        field.spawn((
+                            Text::new(if palette.search.is_empty() {
+                                "Search nodes…".into()
+                            } else {
+                                palette.search.clone()
+                            }),
+                            TextFont {
+                                font_size: 13.0,
+                                ..default()
+                            },
+                            TextColor(if palette.search.is_empty() {
+                                Color::srgb_u8(138, 144, 154)
+                            } else {
+                                Color::srgb_u8(226, 229, 235)
+                            }),
+                            Pickable::IGNORE,
+                        ));
+                    });
+
+                let matches = filtered_node_templates(&palette.search);
+                if matches.is_empty() {
+                    parent.spawn((
+                        Text::new("No matching node types."),
+                        TextFont {
+                            font_size: 12.0,
+                            ..default()
+                        },
+                        TextColor(Color::srgb_u8(150, 156, 167)),
+                        Pickable::IGNORE,
+                    ));
+                } else {
+                    for template in matches.into_iter().take(10) {
+                        spawn_palette_button(parent, template.label(), template);
+                    }
+                }
+
+                parent.spawn((
+                    Text::new("Enter adds the first result • Esc closes"),
+                    TextFont {
+                        font_size: 11.0,
+                        ..default()
+                    },
+                    TextColor(Color::srgb_u8(132, 138, 149)),
+                    Pickable::IGNORE,
+                ));
+            })
+            .id();
+        commands.entity(parent).add_child(panel);
+        registry.palette_view = Some(panel);
+    }
+
+    registry.last_palette_revision = palette.revision;
+}
+
 fn sync_node_views(
     mut commands: Commands,
     graph: Res<GraphEditorState>,
@@ -685,6 +1155,9 @@ fn sync_node_views(
                 | NodeKind::ToolChoice { .. }
                 | NodeKind::DefaultMaxTurns { .. }
         );
+        let is_model_node = matches!(node_snapshot.kind, NodeKind::Model { .. });
+        let is_agent_node = matches!(node_snapshot.kind, NodeKind::Agent);
+        let is_output_node = matches!(node_snapshot.kind, NodeKind::TextOutput { .. });
 
         let root = commands
             .spawn((
@@ -807,6 +1280,8 @@ fn sync_node_views(
                                         })
                                         .insert(Pickable::IGNORE)
                                         .with_children(|group| {
+                                            let connected =
+                                                !graph.input_sources(node_id, spec.ty).is_empty();
                                             spawn_port_button(
                                                 group,
                                                 PortAddress {
@@ -826,7 +1301,13 @@ fn sync_node_views(
                                                     font_size: 13.0,
                                                     ..default()
                                                 },
-                                                TextColor(Color::srgb_u8(205, 208, 214)),
+                                                TextColor(if spec.required {
+                                                    Color::srgb_u8(244, 230, 165)
+                                                } else if connected {
+                                                    Color::srgb_u8(218, 221, 227)
+                                                } else {
+                                                    Color::srgb_u8(182, 186, 195)
+                                                }),
                                                 Pickable::IGNORE,
                                             ));
                                         });
@@ -850,13 +1331,19 @@ fn sync_node_views(
                                         })
                                         .insert(Pickable::IGNORE)
                                         .with_children(|group| {
+                                            let connected =
+                                                !graph.output_targets(node_id, spec.ty).is_empty();
                                             group.spawn((
                                                 Text::new(spec.name),
                                                 TextFont {
                                                     font_size: 13.0,
                                                     ..default()
                                                 },
-                                                TextColor(Color::srgb_u8(205, 208, 214)),
+                                                TextColor(if connected {
+                                                    Color::srgb_u8(218, 221, 227)
+                                                } else {
+                                                    Color::srgb_u8(182, 186, 195)
+                                                }),
                                                 Pickable::IGNORE,
                                             ));
                                             spawn_port_button(
@@ -960,7 +1447,9 @@ fn sync_node_views(
                             ));
                         });
                     } else {
-                        for line in node_body_lines(&node_snapshot.kind, is_text_editing, &editing) {
+                        for line in
+                            node_body_lines(&graph, node_id, &node_snapshot.kind, is_text_editing, &editing)
+                        {
                             body.spawn((
                                 Text::new(line),
                                 TextFont {
@@ -993,17 +1482,64 @@ fn sync_node_views(
                         body.spawn(Node {
                             width: Val::Percent(100.0),
                             display: Display::Flex,
+                            flex_wrap: FlexWrap::Wrap,
                             column_gap: Val::Px(8.0),
+                            row_gap: Val::Px(8.0),
                             margin: UiRect::top(Val::Px(4.0)),
                             ..default()
                         })
                         .with_children(|row| {
+                            if is_model_node {
+                                spawn_node_action_button(
+                                    row,
+                                    "Refresh",
+                                    NodeAction::RefreshModels(node_id),
+                                );
+                            }
                             spawn_node_action_button(
                                 row,
                                 "Prev",
                                 NodeAction::PreviousSetting(node_id),
                             );
                             spawn_node_action_button(row, "Next", NodeAction::NextSetting(node_id));
+                        });
+                    }
+
+                    if is_selected {
+                        body.spawn(Node {
+                            width: Val::Percent(100.0),
+                            display: Display::Flex,
+                            flex_wrap: FlexWrap::Wrap,
+                            column_gap: Val::Px(8.0),
+                            row_gap: Val::Px(8.0),
+                            margin: UiRect::top(Val::Px(4.0)),
+                            ..default()
+                        })
+                        .with_children(|row| {
+                            if is_agent_node {
+                                spawn_node_action_button(
+                                    row,
+                                    "Run",
+                                    NodeAction::RunAgent(node_id),
+                                );
+                            }
+                            if is_output_node {
+                                spawn_node_action_button(
+                                    row,
+                                    "Clear",
+                                    NodeAction::ClearOutput(node_id),
+                                );
+                            }
+                            spawn_node_action_button(
+                                row,
+                                "Duplicate",
+                                NodeAction::DuplicateNode(node_id),
+                            );
+                            spawn_node_action_button(
+                                row,
+                                "Delete",
+                                NodeAction::DeleteNode(node_id),
+                            );
                         });
                     }
                 });
@@ -1101,45 +1637,68 @@ fn update_node_view_state(
     }
 }
 
-fn update_sidebar_text(
+fn update_chrome_text(
     graph: Res<GraphEditorState>,
     runtime: Res<RigEditorRuntime>,
     editing: Res<TextEditingState>,
+    palette: Res<NodePaletteState>,
     registry: Res<GraphUiRegistry>,
     mut texts: Query<&mut Text>,
 ) {
     if let Some(entity) = registry.status_text {
         if let Ok(mut text) = texts.get_mut(entity) {
-            let pending = runtime
+            let run_status = runtime
                 .pending_request
-                .map(|request_id| format!("pending run #{request_id}"))
+                .map(|request_id| format!("running #{request_id}"))
                 .unwrap_or_else(|| "idle".into());
-            let model_status = if runtime.ollama_ready {
-                format!("ready / {} model(s)", runtime.ollama_models.len())
-            } else {
-                "offline".into()
-            };
             let selection_status = graph
                 .selected_node
                 .and_then(|node_id| graph.node(node_id))
                 .map(|node| node.kind.title().to_string())
-                .unwrap_or_else(|| "nothing selected".into());
-            let editing_status = editing
-                .target
-                .and_then(|node_id| graph.node(node_id))
-                .map(|node| format!("editing {}", node.kind.title()))
-                .unwrap_or_else(|| "not editing".into());
+                .unwrap_or_else(|| "no selection".into());
+            let palette_status = if palette.visible {
+                "palette open"
+            } else {
+                "palette closed"
+            };
             text.0 = format!(
-                "Ollama: {}  •  {}  •  {}  •  selected={}  •  nodes={} edges={}  •  zoom={:.0}%  •  {}",
-                runtime.ollama_endpoint,
-                model_status,
-                pending,
+                "Ollama {}  •  {} local model(s)  •  {}  •  {}  •  zoom {:.0}%  •  {}",
+                if runtime.ollama_ready {
+                    "ready"
+                } else {
+                    "offline"
+                },
+                runtime.ollama_models.len(),
+                run_status,
                 selection_status,
-                graph.nodes.len(),
-                graph.edges.len(),
                 graph.zoom * 100.0,
-                editing_status
+                if editing.target.is_some() {
+                    "editing"
+                } else {
+                    palette_status
+                }
             );
+        }
+    }
+
+    if let Some(entity) = registry.inspector_title_text {
+        if let Ok(mut text) = texts.get_mut(entity) {
+            let selected_title = graph
+                .selected_node
+                .and_then(|node_id| graph.node(node_id))
+                .map(|node| node.kind.title().to_string())
+                .unwrap_or_else(|| "Inspector".into());
+            text.0 = if graph.selected_node.is_some() {
+                format!("{selected_title} Inspector")
+            } else {
+                "Inspector".into()
+            };
+        }
+    }
+
+    if let Some(entity) = registry.inspector_body_text {
+        if let Ok(mut text) = texts.get_mut(entity) {
+            text.0 = inspector_text(&graph, &runtime);
         }
     }
 }
@@ -1335,7 +1894,10 @@ fn node_root_style(node: &GraphNode, pan: Vec2, zoom: f32) -> Node {
 
 fn node_dimensions(kind: &NodeKind) -> Vec2 {
     let row_count = kind.inputs().len().max(kind.outputs().len()).max(1) as f32;
-    let body_rows = kind.summary_lines().len() as f32;
+    let body_rows = match kind {
+        NodeKind::Agent => 18.0,
+        _ => kind.summary_lines().len() as f32,
+    };
     let height = NODE_HEADER_HEIGHT
         + 16.0
         + (row_count * (PORT_ROW_HEIGHT + 4.0))
@@ -1359,6 +1921,8 @@ fn port_center(graph: &GraphEditorState, address: PortAddress) -> Option<Vec2> {
 }
 
 fn node_body_lines(
+    graph: &GraphEditorState,
+    node_id: NodeId,
     kind: &NodeKind,
     is_text_editing: bool,
     editing: &TextEditingState,
@@ -1377,6 +1941,10 @@ fn node_body_lines(
         return lines;
     }
 
+    if matches!(kind, NodeKind::Agent) {
+        return agent_body_lines(graph, node_id);
+    }
+
     kind.summary_lines()
 }
 
@@ -1386,6 +1954,236 @@ fn inline_editor_value_text(editing: &TextEditingState) -> String {
     } else {
         preview_multiline(&editing.buffer, 10).join("\n")
     }
+}
+
+fn filtered_node_templates(search: &str) -> Vec<NodeTemplate> {
+    let needle = search.trim().to_ascii_lowercase();
+    NodeTemplate::ALL
+        .into_iter()
+        .filter(|template| {
+            needle.is_empty() || template.label().to_ascii_lowercase().contains(&needle)
+        })
+        .collect()
+}
+
+fn agent_body_lines(graph: &GraphEditorState, node_id: NodeId) -> Vec<String> {
+    let mut lines = Vec::new();
+    push_agent_group(
+        &mut lines,
+        "Core",
+        [
+            ("model", port_status(graph, node_id, PortType::Model, true)),
+            (
+                "prompt",
+                port_status(graph, node_id, PortType::Prompt, true),
+            ),
+            (
+                "text output",
+                if graph
+                    .output_targets(node_id, PortType::TextResponse)
+                    .is_empty()
+                {
+                    "missing".into()
+                } else {
+                    format!(
+                        "{} sink",
+                        graph.output_targets(node_id, PortType::TextResponse).len()
+                    )
+                },
+            ),
+        ],
+    );
+    push_agent_group(
+        &mut lines,
+        "Identity",
+        [
+            (
+                "name",
+                port_status(graph, node_id, PortType::AgentName, false),
+            ),
+            (
+                "description",
+                port_status(graph, node_id, PortType::AgentDescription, false),
+            ),
+            (
+                "preamble",
+                port_status(graph, node_id, PortType::Preamble, false),
+            ),
+        ],
+    );
+    push_agent_group(
+        &mut lines,
+        "Context",
+        [
+            (
+                "static_context",
+                multi_port_status(graph, node_id, PortType::StaticContext),
+            ),
+            (
+                "dynamic_context",
+                multi_port_status(graph, node_id, PortType::DynamicContext),
+            ),
+        ],
+    );
+    push_agent_group(
+        &mut lines,
+        "Sampling",
+        [
+            (
+                "temperature",
+                port_status(graph, node_id, PortType::Temperature, false),
+            ),
+            (
+                "max_tokens",
+                port_status(graph, node_id, PortType::MaxTokens, false),
+            ),
+            (
+                "default_max_turns",
+                port_status(graph, node_id, PortType::DefaultMaxTurns, false),
+            ),
+        ],
+    );
+    push_agent_group(
+        &mut lines,
+        "Advanced",
+        [
+            (
+                "additional_params",
+                port_status(graph, node_id, PortType::AdditionalParams, false),
+            ),
+            (
+                "tool_server_handle",
+                port_status(graph, node_id, PortType::ToolServerHandle, false),
+            ),
+            ("hook", port_status(graph, node_id, PortType::Hook, false)),
+            (
+                "output_schema",
+                port_status(graph, node_id, PortType::OutputSchema, false),
+            ),
+        ],
+    );
+    lines
+}
+
+fn push_agent_group<const N: usize>(
+    lines: &mut Vec<String>,
+    title: &str,
+    entries: [(&str, String); N],
+) {
+    lines.push(format!("[{title}]"));
+    for (label, status) in entries {
+        lines.push(format!("{label}: {status}"));
+    }
+}
+
+fn port_status(graph: &GraphEditorState, node_id: NodeId, ty: PortType, required: bool) -> String {
+    let count = graph.input_sources(node_id, ty).len();
+    if count == 0 {
+        if required {
+            "missing".into()
+        } else {
+            "optional".into()
+        }
+    } else {
+        format!("{count} connected")
+    }
+}
+
+fn multi_port_status(graph: &GraphEditorState, node_id: NodeId, ty: PortType) -> String {
+    let count = graph.input_sources(node_id, ty).len();
+    if count == 0 {
+        "optional".into()
+    } else {
+        format!("{count} connected")
+    }
+}
+
+fn inspector_text(graph: &GraphEditorState, runtime: &RigEditorRuntime) -> String {
+    let Some(selected) = graph.selected_node else {
+        return format!(
+            "No node selected.\n\nGraph\n• nodes: {}\n• edges: {}\n• zoom: {:.0}%\n\nRuntime\n• Ollama: {}\n• endpoint: {}\n• {}\n\nUse Space or right-click to add nodes.",
+            graph.nodes.len(),
+            graph.edges.len(),
+            graph.zoom * 100.0,
+            if runtime.ollama_ready {
+                "ready"
+            } else {
+                "offline"
+            },
+            runtime.ollama_endpoint,
+            runtime.last_status
+        );
+    };
+
+    let Some(node) = graph.node(selected) else {
+        return "Selection no longer exists.".into();
+    };
+
+    let incoming = node.kind.inputs().len();
+    let outgoing = node.kind.outputs().len();
+    let mut lines = vec![
+        format!("Node\n• id: {}", node.id),
+        format!("• kind: {}", node.kind.title()),
+        format!("• position: {:.0}, {:.0}", node.position.x, node.position.y),
+        format!("• input ports: {incoming}"),
+        format!("• output ports: {outgoing}"),
+    ];
+
+    match &node.kind {
+        NodeKind::Agent => {
+            lines.push(String::new());
+            lines.push("Validation".into());
+            match compile_agent_run(graph, runtime, node.id) {
+                Ok(run) => {
+                    lines.push("• ready to run".into());
+                    lines.push(format!("• model: {}", run.model));
+                    if !run.warnings.is_empty() {
+                        for warning in run.warnings {
+                            lines.push(format!("• warning: {warning}"));
+                        }
+                    }
+                }
+                Err(error) => lines.push(format!("• {error}")),
+            }
+        }
+        NodeKind::Model { model_name, .. } => {
+            lines.push(String::new());
+            lines.push("Provider".into());
+            lines.push(format!(
+                "• Ollama: {}",
+                if runtime.ollama_ready {
+                    "ready"
+                } else {
+                    "offline"
+                }
+            ));
+            lines.push(format!("• endpoint: {}", runtime.ollama_endpoint));
+            lines.push(format!(
+                "• selected: {}",
+                model_name.as_deref().unwrap_or("(none)")
+            ));
+            lines.push(format!("• discovered: {}", runtime.ollama_models.len()));
+        }
+        NodeKind::TextOutput { status, text, .. } => {
+            lines.push(String::new());
+            lines.push("Output".into());
+            lines.push(format!("• status: {status}"));
+            lines.push("• preview:".into());
+            lines.extend(preview_multiline(text, 8));
+        }
+        _ => {
+            if let Some(text) = node.kind.editable_text() {
+                lines.push(String::new());
+                lines.push("Content".into());
+                lines.extend(preview_multiline(text, 8));
+            }
+        }
+    }
+
+    lines.push(String::new());
+    lines.push("Runtime".into());
+    lines.push(format!("• {}", runtime.last_status));
+    lines.join("\n")
 }
 
 fn preview_multiline(value: &str, max_lines: usize) -> Vec<String> {
