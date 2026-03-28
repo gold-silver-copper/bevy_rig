@@ -1,5 +1,9 @@
+mod catalog;
+mod compile;
+mod document;
 mod graph;
 mod runtime;
+mod session;
 mod ui;
 
 use bevy::prelude::*;

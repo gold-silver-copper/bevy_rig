@@ -9,15 +9,17 @@ use bevy::{
     },
     math::Rot2,
     prelude::*,
-    ui::{ComputedNode, RelativeCursorPosition},
+    ui::{ComputedNode, RelativeCursorPosition, ui_transform::UiGlobalTransform},
+    window::PrimaryWindow,
 };
 
 use crate::{
+    compile::{compile_agent_run, compile_selected_agent_run},
     graph::{
-        DraggingWire, GraphEditorState, GraphNode, NodeId, NodeKind, NodeTemplate, PortAddress,
-        PortDirection, PortType,
+        DraggingWire, EditorSession, GraphDocument, GraphNode, NodeId, NodeTemplate, NodeType,
+        NodeValue, PortAddress, PortDirection, PortType,
     },
-    runtime::{RigEditorRuntime, compile_agent_run, compile_selected_agent_run},
+    runtime::RigEditorRuntime,
 };
 
 const SIDEBAR_WIDTH: f32 = 220.0;
@@ -31,16 +33,18 @@ const PORT_DOT_SIZE: f32 = 14.0;
 const PORT_X_OFFSET: f32 = 22.0;
 const WIRE_THICKNESS: f32 = 3.0;
 const GRID_SPACING: f32 = 28.0;
+const PALETTE_WIDTH: f32 = 248.0;
 
 pub struct NodeGraphEditorPlugin;
 
 impl Plugin for NodeGraphEditorPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<GraphEditorState>()
+        app.init_resource::<GraphDocument>()
+            .init_resource::<EditorSession>()
             .init_resource::<GraphUiRegistry>()
             .init_resource::<TextEditingState>()
             .init_resource::<NodePaletteState>()
-            .add_systems(Startup, setup_editor_ui)
+            .add_systems(Startup, (setup_editor_ui, initialize_editor_session))
             .add_systems(
                 Update,
                 (
@@ -60,6 +64,12 @@ impl Plugin for NodeGraphEditorPlugin {
     }
 }
 
+fn initialize_editor_session(document: Res<GraphDocument>, mut session: ResMut<EditorSession>) {
+    if session.selected_node.is_none() {
+        session.select_node(document.first_node_id_by_type(NodeType::Agent));
+    }
+}
+
 #[derive(Resource, Default)]
 struct GraphUiRegistry {
     canvas: Option<Entity>,
@@ -75,6 +85,7 @@ struct GraphUiRegistry {
     last_graph_revision: u64,
     last_edit_revision: u64,
     last_palette_revision: u64,
+    last_zoom: f32,
 }
 
 #[derive(Resource, Default)]
@@ -191,13 +202,14 @@ struct NodeActionButton(NodeAction);
 struct PaletteButton(NodeTemplate);
 
 fn select_node_for_editing(
-    graph: &mut GraphEditorState,
+    document: &mut GraphDocument,
+    session: &mut EditorSession,
     editing: &mut TextEditingState,
     node_id: NodeId,
 ) {
-    let selection_changed = graph.selected_node != Some(node_id);
-    graph.selected_node = Some(node_id);
-    if let Some(value) = graph.node_kind(node_id).and_then(NodeKind::editable_text) {
+    let selection_changed = session.selected_node != Some(node_id);
+    session.select_node(Some(node_id));
+    if let Some(value) = document.node(node_id).and_then(GraphNode::editable_text) {
         editing.begin_if_needed(node_id, value);
     } else if selection_changed || editing.target.is_some() {
         editing.clear();
@@ -421,61 +433,58 @@ fn setup_editor_ui(mut commands: Commands, mut registry: ResMut<GraphUiRegistry>
         );
     });
 
-    let canvas =
-        commands
-            .spawn((
-                Node {
-                    width: Val::Percent(100.0),
-                    height: Val::Percent(100.0),
-                    position_type: PositionType::Relative,
-                    overflow: Overflow::clip(),
-                    ..default()
-                },
-                CanvasSurface,
-                RelativeCursorPosition::default(),
-                Pickable {
-                    should_block_lower: false,
-                    is_hoverable: true,
-                },
-                BackgroundColor(Color::srgb_u8(24, 25, 29)),
-            ))
-            .observe(
-                |mut click: On<Pointer<Click>>,
-                 mut graph: ResMut<GraphEditorState>,
-                 mut editing: ResMut<TextEditingState>,
-                 mut palette: ResMut<NodePaletteState>,
-                 canvas_query: Query<
-                    (&ComputedNode, &RelativeCursorPosition),
-                    With<CanvasSurface>,
-                >| {
-                    if click.button == PointerButton::Primary {
-                        click.propagate(false);
-                        graph.selected_node = None;
-                        graph.dragging_wire = None;
-                        editing.clear();
-                        palette.close();
-                    } else if click.button == PointerButton::Secondary {
-                        click.propagate(false);
-                        if let Ok((canvas_node, cursor)) = canvas_query.single() {
-                            let canvas_size = canvas_node.size();
-                            let normalized = cursor.normalized.unwrap_or(Vec2::ZERO);
-                            let screen_position = ((normalized + Vec2::splat(0.5)) * canvas_size)
-                                .clamp(Vec2::ZERO, canvas_size);
-                            let spawn_world = (screen_position - graph.pan) / graph.zoom.max(0.001);
-                            palette.open(screen_position, spawn_world);
-                        }
+    let canvas = commands
+        .spawn((
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                position_type: PositionType::Relative,
+                overflow: Overflow::clip(),
+                ..default()
+            },
+            CanvasSurface,
+            RelativeCursorPosition::default(),
+            Pickable {
+                should_block_lower: false,
+                is_hoverable: true,
+            },
+            BackgroundColor(Color::srgb_u8(24, 25, 29)),
+        ))
+        .observe(
+            |mut click: On<Pointer<Click>>,
+             mut session: ResMut<EditorSession>,
+             mut editing: ResMut<TextEditingState>,
+             mut palette: ResMut<NodePaletteState>,
+             canvas_query: Query<(&ComputedNode, &UiGlobalTransform, &RelativeCursorPosition), With<CanvasSurface>>| {
+                if click.button == PointerButton::Primary {
+                    click.propagate(false);
+                    session.select_node(None);
+                    session.dragging_wire = None;
+                    session.touch();
+                    editing.clear();
+                    palette.close();
+                } else if click.button == PointerButton::Secondary {
+                    click.propagate(false);
+                    if let Some(screen_position) =
+                        canvas_local_from_window_position(&canvas_query, click.pointer_location.position)
+                    {
+                        let spawn_world =
+                            screen_to_world(screen_position, session.pan, session.zoom);
+                        palette.open(screen_position, spawn_world);
                     }
-                },
-            )
-            .observe(
-                |mut drag: On<Pointer<Drag>>, mut graph: ResMut<GraphEditorState>| {
-                    if drag.button == PointerButton::Middle {
-                        drag.propagate(false);
-                        graph.pan += drag.delta;
-                    }
-                },
-            )
-            .id();
+                }
+            },
+        )
+        .observe(
+            |mut drag: On<Pointer<Drag>>, mut session: ResMut<EditorSession>| {
+                if drag.button == PointerButton::Middle {
+                    drag.propagate(false);
+                    session.pan += drag.delta;
+                    session.touch();
+                }
+            },
+        )
+        .id();
     commands.entity(main).add_child(canvas);
 
     let overlay_layer = commands
@@ -553,18 +562,23 @@ fn spawn_editor_button(
         ));
 }
 
-fn spawn_node_action_button(parent: &mut ChildSpawnerCommands, label: &str, action: NodeAction) {
+fn spawn_scaled_node_action_button(
+    parent: &mut ChildSpawnerCommands,
+    label: &str,
+    action: NodeAction,
+    zoom: f32,
+) {
     parent
         .spawn((
             Button,
             Node {
-                min_width: Val::Px(74.0),
-                min_height: Val::Px(30.0),
+                min_width: Val::Px(scaled(74.0, zoom)),
+                min_height: Val::Px(scaled(30.0, zoom)),
                 align_items: AlignItems::Center,
                 justify_content: JustifyContent::Center,
-                padding: UiRect::axes(Val::Px(10.0), Val::Px(6.0)),
+                padding: UiRect::axes(Val::Px(scaled(10.0, zoom)), Val::Px(scaled(6.0, zoom))),
                 border: UiRect::all(Val::Px(1.0)),
-                border_radius: BorderRadius::all(Val::Px(8.0)),
+                border_radius: BorderRadius::all(Val::Px(scaled(8.0, zoom))),
                 ..default()
             },
             NodeActionButton(action),
@@ -577,7 +591,7 @@ fn spawn_node_action_button(parent: &mut ChildSpawnerCommands, label: &str, acti
         .with_child((
             Text::new(label),
             TextFont {
-                font_size: 12.0,
+                font_size: scaled_font(12.0, zoom),
                 ..default()
             },
             TextColor(Color::srgb_u8(232, 234, 238)),
@@ -616,7 +630,8 @@ fn spawn_palette_button(parent: &mut ChildSpawnerCommands, label: &str, template
 }
 
 fn handle_editor_buttons(
-    mut graph: ResMut<GraphEditorState>,
+    mut document: ResMut<GraphDocument>,
+    mut session: ResMut<EditorSession>,
     mut runtime: ResMut<RigEditorRuntime>,
     mut editing: ResMut<TextEditingState>,
     mut palette: ResMut<NodePaletteState>,
@@ -634,49 +649,60 @@ fn handle_editor_buttons(
 
         match button.0 {
             EditorAction::ResetDemo => {
-                graph.reset_demo();
+                document.reset_demo();
+                session.reset_view();
+                session.select_node(document.first_node_id_by_type(NodeType::Agent));
                 editing.clear();
                 palette.close();
                 runtime.last_status = "Graph reset to the default Ollama agent flow.".into();
             }
-            EditorAction::RunSelectedAgent => match compile_selected_agent_run(&graph, &runtime) {
-                Ok(request) => {
-                    let output_node = request.output_node;
-                    let model = request.model.clone();
-                    let agent_label = request
-                        .agent_name
-                        .clone()
-                        .unwrap_or_else(|| format!("agent#{}", request.agent_id));
-                    graph.set_output_result(
-                        output_node,
-                        "Running selected graph…".into(),
-                        format!("queued via Ollama / {model} as {agent_label}"),
-                    );
-                    if let Err(error) = runtime.request_run(request) {
-                        runtime.last_status = error.to_string();
+            EditorAction::RunSelectedAgent => {
+                match compile_selected_agent_run(&document, &session, &runtime) {
+                    Ok(request) => {
+                        let output_node = request.output_node;
+                        let model = request.model.clone();
+                        let agent_label = request
+                            .agent_name
+                            .clone()
+                            .unwrap_or_else(|| format!("agent#{}", request.agent_id));
+                        document.set_output_result(
+                            output_node,
+                            "Running selected graph…".into(),
+                            format!("queued via Ollama / {model} as {agent_label}"),
+                        );
+                        if let Err(error) = runtime.request_run(request) {
+                            runtime.last_status = error.to_string();
+                        }
                     }
+                    Err(error) => runtime.last_status = error.to_string(),
                 }
-                Err(error) => runtime.last_status = error.to_string(),
-            },
+            }
             EditorAction::StopRun => {
                 if let Some(output_node) = runtime.stop_run() {
-                    graph.set_output_result(output_node, "Run stopped.".into(), "stopped".into());
+                    document.set_output_result(
+                        output_node,
+                        "Run stopped.".into(),
+                        "stopped".into(),
+                    );
                 }
             }
             EditorAction::OpenNodePalette => {
                 if let Ok(canvas) = canvas_query.single() {
                     let center = canvas.size() * 0.5;
-                    let spawn = (center - graph.pan) / graph.zoom.max(0.001);
+                    let spawn = screen_to_world(center, session.pan, session.zoom);
                     palette.open(center, spawn);
                 }
             }
             EditorAction::FrameSelected => {
                 if let Ok(canvas) = canvas_query.single() {
-                    if let Some(node_id) = graph.selected_node {
-                        if let Some(node) = graph.node(node_id) {
-                            graph.pan = canvas.size() * 0.5
-                                - (node.position + Vec2::new(NODE_WIDTH * 0.5, 120.0))
-                                    * graph.zoom.max(0.001);
+                    if let Some(node_id) = session.selected_node {
+                        if let Some(node) = document.node(node_id) {
+                            session.pan = canvas.size() * 0.5
+                                - Vec2::new(
+                                    (node.position.x + NODE_WIDTH * 0.5) * session.zoom.max(0.001),
+                                    (node.position.y + 120.0) * session.zoom.max(0.001),
+                                );
+                            session.touch();
                         } else {
                             runtime.last_status = "Select a node to frame it.".into();
                         }
@@ -687,13 +713,13 @@ fn handle_editor_buttons(
             }
             EditorAction::FrameGraph => {
                 if let Ok(canvas) = canvas_query.single() {
-                    if graph.nodes.is_empty() {
+                    if document.node_count() == 0 {
                         runtime.last_status = "Graph is empty.".into();
                         continue;
                     }
                     let mut min = Vec2::splat(f32::INFINITY);
                     let mut max = Vec2::splat(f32::NEG_INFINITY);
-                    for node in &graph.nodes {
+                    for node in document.iter_nodes() {
                         min = min.min(node.position);
                         max = max.max(node.position + Vec2::new(NODE_WIDTH, 220.0));
                     }
@@ -703,8 +729,10 @@ fn handle_editor_buttons(
                     let fit = (available.x / bounds.x)
                         .min(available.y / bounds.y)
                         .clamp(0.45, 1.4);
-                    graph.zoom = fit;
-                    graph.pan = canvas.size() * 0.5 - (min + bounds * 0.5) * graph.zoom;
+                    session.zoom = fit;
+                    session.pan = canvas.size() * 0.5
+                        - world_to_screen(min + bounds * 0.5, Vec2::ZERO, session.zoom);
+                    session.touch();
                 }
             }
         }
@@ -712,7 +740,8 @@ fn handle_editor_buttons(
 }
 
 fn handle_node_buttons(
-    mut graph: ResMut<GraphEditorState>,
+    mut document: ResMut<GraphDocument>,
+    mut session: ResMut<EditorSession>,
     mut runtime: ResMut<RigEditorRuntime>,
     mut editing: ResMut<TextEditingState>,
     mut palette: ResMut<NodePaletteState>,
@@ -730,7 +759,7 @@ fn handle_node_buttons(
         match button.0 {
             NodeAction::SaveText(node_id) => {
                 if editing.target == Some(node_id)
-                    && graph.set_node_text_value(node_id, editing.buffer.clone())
+                    && document.set_node_text_value(node_id, editing.buffer.clone())
                 {
                     runtime.last_status = "Saved node text.".into();
                     editing.clear();
@@ -745,24 +774,24 @@ fn handle_node_buttons(
                 }
             }
             NodeAction::PreviousSetting(node_id) => {
-                graph.selected_node = Some(node_id);
-                if !graph.cycle_selected_setting(-1, &runtime.ollama_models) {
+                session.select_node(Some(node_id));
+                if !document.cycle_setting(node_id, -1, &runtime.ollama_models) {
                     runtime.last_status = "This node has no previous setting to cycle.".into();
                 }
             }
             NodeAction::NextSetting(node_id) => {
-                graph.selected_node = Some(node_id);
-                if !graph.cycle_selected_setting(1, &runtime.ollama_models) {
+                session.select_node(Some(node_id));
+                if !document.cycle_setting(node_id, 1, &runtime.ollama_models) {
                     runtime.last_status = "This node has no next setting to cycle.".into();
                 }
             }
             NodeAction::RefreshModels(node_id) => {
-                graph.selected_node = Some(node_id);
+                session.select_node(Some(node_id));
                 runtime.request_model_refresh();
             }
             NodeAction::RunAgent(node_id) => {
-                graph.selected_node = Some(node_id);
-                match compile_agent_run(&graph, &runtime, node_id) {
+                session.select_node(Some(node_id));
+                match compile_agent_run(&document, &runtime, node_id) {
                     Ok(request) => {
                         let output_node = request.output_node;
                         let model = request.model.clone();
@@ -770,7 +799,7 @@ fn handle_node_buttons(
                             .agent_name
                             .clone()
                             .unwrap_or_else(|| format!("agent#{}", request.agent_id));
-                        graph.set_output_result(
+                        document.set_output_result(
                             output_node,
                             "Running selected graph…".into(),
                             format!("queued via Ollama / {model} as {agent_label}"),
@@ -783,19 +812,19 @@ fn handle_node_buttons(
                 }
             }
             NodeAction::ClearOutput(node_id) => {
-                if graph.clear_output(node_id) {
+                if document.clear_output(node_id) {
                     runtime.last_status = "Cleared text output.".into();
                 }
             }
             NodeAction::DuplicateNode(node_id) => {
-                graph.selected_node = Some(node_id);
-                if graph
+                session.select_node(Some(node_id));
+                if document
                     .duplicate_node(node_id, Vec2::new(36.0, 36.0))
                     .is_some()
                 {
-                    if let Some(selected) = graph.selected_node {
+                    if let Some(selected) = session.selected_node {
                         if let Some(value) =
-                            graph.node_kind(selected).and_then(NodeKind::editable_text)
+                            document.node(selected).and_then(GraphNode::editable_text)
                         {
                             editing.begin_if_needed(selected, value);
                         } else {
@@ -808,7 +837,15 @@ fn handle_node_buttons(
             }
             NodeAction::DeleteNode(node_id) => {
                 let was_editing = editing.target == Some(node_id);
-                if graph.remove_node(node_id) {
+                if document.remove_node(node_id) {
+                    if session.selected_node == Some(node_id) {
+                        session.select_node(None);
+                    }
+                    if matches!(session.dragging_wire, Some(DraggingWire { from, .. }) if from.node == node_id)
+                    {
+                        session.dragging_wire = None;
+                        session.touch();
+                    }
                     if was_editing {
                         editing.clear();
                     }
@@ -824,7 +861,7 @@ fn handle_text_edit_input(
     mut key_events: MessageReader<KeyboardInput>,
     keys: Res<ButtonInput<KeyCode>>,
     mut editing: ResMut<TextEditingState>,
-    mut graph: ResMut<GraphEditorState>,
+    mut document: ResMut<GraphDocument>,
 ) {
     let Some(target) = editing.target else {
         return;
@@ -848,7 +885,7 @@ fn handle_text_edit_input(
             }
             KeyCode::Enter | KeyCode::NumpadEnter => {
                 if ctrl_pressed {
-                    graph.set_node_text_value(target, editing.buffer.clone());
+                    document.set_node_text_value(target, editing.buffer.clone());
                     editing.clear();
                     return;
                 }
@@ -870,8 +907,9 @@ fn handle_text_edit_input(
 fn handle_canvas_zoom(
     mut wheel_events: MessageReader<MouseWheel>,
     keys: Res<ButtonInput<KeyCode>>,
-    mut graph: ResMut<GraphEditorState>,
-    canvas_query: Query<(&ComputedNode, &RelativeCursorPosition), With<CanvasSurface>>,
+    mut session: ResMut<EditorSession>,
+    canvas_query: Query<(&ComputedNode, &UiGlobalTransform, &RelativeCursorPosition), With<CanvasSurface>>,
+    windows: Query<&Window, With<PrimaryWindow>>,
 ) {
     let modifier_pressed = keys.any_pressed([
         KeyCode::SuperLeft,
@@ -883,10 +921,7 @@ fn handle_canvas_zoom(
         return;
     }
 
-    let Ok((canvas_node, cursor)) = canvas_query.single() else {
-        return;
-    };
-    let Some(pointer) = cursor.normalized else {
+    let Some(pointer_screen) = current_canvas_cursor_local_position(&windows, &canvas_query) else {
         return;
     };
 
@@ -901,23 +936,23 @@ fn handle_canvas_zoom(
         return;
     }
 
-    let canvas_size = canvas_node.size();
-    let pointer_screen = (pointer + Vec2::splat(0.5)) * canvas_size;
-    let old_zoom = graph.zoom.max(0.001);
+    let old_zoom = session.zoom.max(0.001);
     let new_zoom = (old_zoom * 1.1_f32.powf(scroll_delta)).clamp(0.4, 2.5);
     if (new_zoom - old_zoom).abs() < f32::EPSILON {
         return;
     }
 
-    let world_at_pointer = (pointer_screen - graph.pan) / old_zoom;
-    graph.zoom = new_zoom;
-    graph.pan = pointer_screen - world_at_pointer * new_zoom;
+    let world_at_pointer = screen_to_world(pointer_screen, session.pan, old_zoom);
+    session.zoom = new_zoom;
+    session.pan = pointer_screen - world_to_screen(world_at_pointer, Vec2::ZERO, new_zoom);
+    session.touch();
 }
 
 fn handle_palette_shortcuts(
     mut key_events: MessageReader<KeyboardInput>,
     keys: Res<ButtonInput<KeyCode>>,
-    mut graph: ResMut<GraphEditorState>,
+    mut document: ResMut<GraphDocument>,
+    mut session: ResMut<EditorSession>,
     mut editing: ResMut<TextEditingState>,
     mut palette: ResMut<NodePaletteState>,
     canvas_query: Query<&ComputedNode, With<CanvasSurface>>,
@@ -941,7 +976,7 @@ fn handle_palette_shortcuts(
                 KeyCode::Space | KeyCode::Tab => {
                     if let Ok(canvas) = canvas_query.single() {
                         let center = canvas.size() * 0.5;
-                        let spawn = (center - graph.pan) / graph.zoom.max(0.001);
+                        let spawn = screen_to_world(center, session.pan, session.zoom);
                         palette.open(center, spawn);
                     }
                     continue;
@@ -962,8 +997,8 @@ fn handle_palette_shortcuts(
             }
             KeyCode::Enter | KeyCode::NumpadEnter => {
                 if let Some(template) = filtered_node_templates(&palette.search).first().copied() {
-                    let node_id = graph.add_node(template.instantiate(), palette.spawn_world);
-                    select_node_for_editing(&mut graph, &mut editing, node_id);
+                    let node_id = document.add_node(template.instantiate(), palette.spawn_world);
+                    select_node_for_editing(&mut document, &mut session, &mut editing, node_id);
                     palette.close();
                 }
                 return;
@@ -986,7 +1021,8 @@ fn handle_palette_shortcuts(
 }
 
 fn handle_palette_buttons(
-    mut graph: ResMut<GraphEditorState>,
+    mut document: ResMut<GraphDocument>,
+    mut session: ResMut<EditorSession>,
     mut editing: ResMut<TextEditingState>,
     mut palette: ResMut<NodePaletteState>,
     mut interactions: Query<
@@ -1000,8 +1036,8 @@ fn handle_palette_buttons(
             continue;
         }
 
-        let node_id = graph.add_node(button.0.instantiate(), palette.spawn_world);
-        select_node_for_editing(&mut graph, &mut editing, node_id);
+        let node_id = document.add_node(button.0.instantiate(), palette.spawn_world);
+        select_node_for_editing(&mut document, &mut session, &mut editing, node_id);
         palette.close();
     }
 }
@@ -1010,6 +1046,7 @@ fn sync_palette_view(
     mut commands: Commands,
     palette: Res<NodePaletteState>,
     mut registry: ResMut<GraphUiRegistry>,
+    canvas_query: Query<&ComputedNode, With<CanvasSurface>>,
 ) {
     if registry.last_palette_revision == palette.revision {
         return;
@@ -1023,14 +1060,20 @@ fn sync_palette_view(
         let Some(parent) = registry.palette_parent else {
             return;
         };
+        let canvas_size = canvas_query
+            .get(parent)
+            .map(ComputedNode::size)
+            .unwrap_or(Vec2::new(1200.0, 900.0));
+        let max_left = (canvas_size.x - PALETTE_WIDTH - 18.0).max(18.0);
+        let max_top = (canvas_size.y - 320.0).max(18.0);
 
         let panel = commands
             .spawn((
                 Node {
                     position_type: PositionType::Absolute,
-                    left: Val::Px(palette.screen_position.x.clamp(18.0, 780.0)),
-                    top: Val::Px(palette.screen_position.y.clamp(18.0, 520.0)),
-                    width: Val::Px(248.0),
+                    left: Val::Px(palette.screen_position.x.clamp(18.0, max_left)),
+                    top: Val::Px(palette.screen_position.y.clamp(18.0, max_top)),
+                    width: Val::Px(PALETTE_WIDTH),
                     padding: UiRect::all(Val::Px(12.0)),
                     flex_direction: FlexDirection::Column,
                     row_gap: Val::Px(8.0),
@@ -1123,7 +1166,8 @@ fn sync_palette_view(
 
 fn sync_node_views(
     mut commands: Commands,
-    graph: Res<GraphEditorState>,
+    document: Res<GraphDocument>,
+    session: Res<EditorSession>,
     editing: Res<TextEditingState>,
     mut registry: ResMut<GraphUiRegistry>,
 ) {
@@ -1131,8 +1175,9 @@ fn sync_node_views(
         return;
     };
 
-    if registry.last_graph_revision == graph.revision
+    if registry.last_graph_revision == document.revision
         && registry.last_edit_revision == editing.revision
+        && (registry.last_zoom - session.zoom).abs() < f32::EPSILON
     {
         return;
     }
@@ -1141,32 +1186,35 @@ fn sync_node_views(
         commands.entity(entity).despawn();
     }
 
-    for node in &graph.nodes {
+    for node in document.iter_nodes() {
         let node_snapshot = node.clone();
         let node_id = node_snapshot.id;
-        let is_selected = graph.selected_node == Some(node_id);
+        let is_selected = session.selected_node == Some(node_id);
         let is_text_editing =
-            editing.target == Some(node_id) && node_snapshot.kind.editable_text().is_some();
+            editing.target == Some(node_id) && node_snapshot.editable_text().is_some();
+        let zoom = session.zoom.max(0.001);
+        let header_height = scaled(NODE_HEADER_HEIGHT, zoom);
+        let node_padding = scaled(NODE_PADDING, zoom);
+        let port_row_height = scaled(PORT_ROW_HEIGHT, zoom);
         let is_cycle_node = matches!(
-            node_snapshot.kind,
-            NodeKind::Model { .. }
-                | NodeKind::Temperature { .. }
-                | NodeKind::MaxTokens { .. }
-                | NodeKind::ToolChoice { .. }
-                | NodeKind::DefaultMaxTurns { .. }
+            node_snapshot.node_type,
+            NodeType::Model
+                | NodeType::Temperature
+                | NodeType::MaxTokens
+                | NodeType::ToolChoice
+                | NodeType::DefaultMaxTurns
         );
-        let is_model_node = matches!(node_snapshot.kind, NodeKind::Model { .. });
-        let is_agent_node = matches!(node_snapshot.kind, NodeKind::Agent);
-        let is_output_node = matches!(node_snapshot.kind, NodeKind::TextOutput { .. });
+        let is_model_node = matches!(node_snapshot.node_type, NodeType::Model);
+        let is_agent_node = matches!(node_snapshot.node_type, NodeType::Agent);
+        let is_output_node = matches!(node_snapshot.node_type, NodeType::TextOutput);
 
         let root = commands
             .spawn((
                 NodeView { id: node_id },
-                node_root_style(&node_snapshot, graph.pan, graph.zoom),
+                node_root_style(&node_snapshot, session.pan, session.zoom),
                 BackgroundColor(Color::srgb_u8(58, 58, 61)),
                 BorderColor::all(Color::srgb_u8(74, 76, 82)),
                 GlobalZIndex(4),
-                UiTransform::from_scale(Vec2::splat(graph.zoom)),
                 Pickable {
                     should_block_lower: true,
                     is_hoverable: true,
@@ -1174,20 +1222,23 @@ fn sync_node_views(
             ))
             .observe(
                 move |mut click: On<Pointer<Click>>,
-                      mut graph: ResMut<GraphEditorState>,
+                      mut document: ResMut<GraphDocument>,
+                      mut session: ResMut<EditorSession>,
                       mut editing: ResMut<TextEditingState>| {
                     if click.button == PointerButton::Primary {
                         click.propagate(false);
-                        select_node_for_editing(&mut graph, &mut editing, node_id);
+                        select_node_for_editing(&mut document, &mut session, &mut editing, node_id);
                     }
                 },
             )
             .observe(
-                move |mut drag: On<Pointer<Drag>>, mut graph: ResMut<GraphEditorState>| {
+                move |mut drag: On<Pointer<Drag>>,
+                      mut document: ResMut<GraphDocument>,
+                      session: Res<EditorSession>| {
                     if drag.button == PointerButton::Primary {
                         drag.propagate(false);
-                        let zoom = graph.zoom.max(0.001);
-                        graph.move_node(node_id, drag.delta / zoom);
+                        let zoom = session.zoom.max(0.001);
+                        document.move_node(node_id, drag.delta / zoom);
                     }
                 },
             )
@@ -1200,9 +1251,9 @@ fn sync_node_views(
                     NodeHeaderView { id: node_id },
                     Node {
                         width: Val::Percent(100.0),
-                        height: Val::Px(NODE_HEADER_HEIGHT),
+                        height: Val::Px(header_height),
                         align_items: AlignItems::Center,
-                        padding: UiRect::axes(Val::Px(12.0), Val::Px(8.0)),
+                        padding: UiRect::axes(Val::Px(scaled(12.0, zoom)), Val::Px(scaled(8.0, zoom))),
                         border: UiRect::bottom(Val::Px(1.0)),
                         ..default()
                     },
@@ -1218,43 +1269,44 @@ fn sync_node_views(
                 ))
                 .observe(
                     move |mut click: On<Pointer<Click>>,
-                          mut graph: ResMut<GraphEditorState>,
+                          mut document: ResMut<GraphDocument>,
+                          mut session: ResMut<EditorSession>,
                           mut editing: ResMut<TextEditingState>| {
                         if click.button == PointerButton::Primary {
                             click.propagate(false);
-                            select_node_for_editing(&mut graph, &mut editing, node_id);
+                            select_node_for_editing(&mut document, &mut session, &mut editing, node_id);
                         }
                     },
                 )
                 .observe(
-                    move |mut drag: On<Pointer<Drag>>, mut graph: ResMut<GraphEditorState>| {
+                    move |mut drag: On<Pointer<Drag>>, mut document: ResMut<GraphDocument>, session: Res<EditorSession>| {
                         if drag.button == PointerButton::Primary {
                             drag.propagate(false);
-                            let zoom = graph.zoom.max(0.001);
-                            graph.move_node(node_id, drag.delta / zoom);
+                            let zoom = session.zoom.max(0.001);
+                            document.move_node(node_id, drag.delta / zoom);
                         }
                     },
                 )
                 .with_child((
-                    Text::new(node_snapshot.kind.title()),
+                    Text::new(node_snapshot.title.clone()),
                     TextFont {
-                        font_size: 15.0,
+                        font_size: scaled_font(15.0, zoom),
                         ..default()
                     },
                     TextColor(Color::srgb_u8(238, 240, 243)),
                     Pickable::IGNORE,
                 ));
 
-            let inputs = node_snapshot.kind.inputs();
-            let outputs = node_snapshot.kind.outputs();
+            let inputs = node_snapshot.inputs();
+            let outputs = node_snapshot.outputs();
             let row_count = inputs.len().max(outputs.len()).max(1);
 
             parent
                 .spawn(Node {
                     width: Val::Percent(100.0),
-                    padding: UiRect::axes(Val::Px(NODE_PADDING), Val::Px(10.0)),
+                    padding: UiRect::axes(Val::Px(node_padding), Val::Px(scaled(10.0, zoom))),
                     flex_direction: FlexDirection::Column,
-                    row_gap: Val::Px(4.0),
+                    row_gap: Val::Px(scaled(4.0, zoom)),
                     ..default()
                 })
                 .insert(Pickable::IGNORE)
@@ -1263,7 +1315,7 @@ fn sync_node_views(
                         ports
                             .spawn(Node {
                                 width: Val::Percent(100.0),
-                                min_height: Val::Px(PORT_ROW_HEIGHT),
+                                min_height: Val::Px(port_row_height),
                                 align_items: AlignItems::Center,
                                 justify_content: JustifyContent::SpaceBetween,
                                 ..default()
@@ -1275,13 +1327,13 @@ fn sync_node_views(
                                         .spawn(Node {
                                             display: Display::Flex,
                                             align_items: AlignItems::Center,
-                                            column_gap: Val::Px(8.0),
+                                            column_gap: Val::Px(scaled(8.0, zoom)),
                                             ..default()
                                         })
                                         .insert(Pickable::IGNORE)
                                         .with_children(|group| {
                                             let connected =
-                                                !graph.input_sources(node_id, spec.ty).is_empty();
+                                                !document.input_sources(node_id, spec.ty).is_empty();
                                             spawn_port_button(
                                                 group,
                                                 PortAddress {
@@ -1290,6 +1342,7 @@ fn sync_node_views(
                                                     index: row,
                                                 },
                                                 spec.ty,
+                                                zoom,
                                             );
                                             group.spawn((
                                                 Text::new(format!(
@@ -1298,7 +1351,7 @@ fn sync_node_views(
                                                     if spec.required { " *" } else { "" }
                                                 )),
                                                 TextFont {
-                                                    font_size: 13.0,
+                                                    font_size: scaled_font(13.0, zoom),
                                                     ..default()
                                                 },
                                                 TextColor(if spec.required {
@@ -1314,7 +1367,7 @@ fn sync_node_views(
                                 } else {
                                     row_parent.spawn((
                                         Node {
-                                            width: Val::Px(124.0),
+                                            width: Val::Px(scaled(124.0, zoom)),
                                             ..default()
                                         },
                                         Pickable::IGNORE,
@@ -1326,17 +1379,17 @@ fn sync_node_views(
                                         .spawn(Node {
                                             display: Display::Flex,
                                             align_items: AlignItems::Center,
-                                            column_gap: Val::Px(8.0),
+                                            column_gap: Val::Px(scaled(8.0, zoom)),
                                             ..default()
                                         })
                                         .insert(Pickable::IGNORE)
                                         .with_children(|group| {
                                             let connected =
-                                                !graph.output_targets(node_id, spec.ty).is_empty();
+                                                !document.output_targets(node_id, spec.ty).is_empty();
                                             group.spawn((
                                                 Text::new(spec.name),
                                                 TextFont {
-                                                    font_size: 13.0,
+                                                    font_size: scaled_font(13.0, zoom),
                                                     ..default()
                                                 },
                                                 TextColor(if connected {
@@ -1354,12 +1407,13 @@ fn sync_node_views(
                                                     index: row,
                                                 },
                                                 spec.ty,
+                                                zoom,
                                             );
                                         });
                                 } else {
                                     row_parent.spawn((
                                         Node {
-                                            width: Val::Px(124.0),
+                                            width: Val::Px(scaled(124.0, zoom)),
                                             ..default()
                                         },
                                         Pickable::IGNORE,
@@ -1373,9 +1427,9 @@ fn sync_node_views(
                 .spawn((
                     Node {
                         width: Val::Percent(100.0),
-                        padding: UiRect::all(Val::Px(NODE_PADDING)),
+                        padding: UiRect::all(Val::Px(node_padding)),
                         flex_direction: FlexDirection::Column,
-                        row_gap: Val::Px(6.0),
+                        row_gap: Val::Px(scaled(6.0, zoom)),
                         border: UiRect::top(Val::Px(1.0)),
                         ..default()
                     },
@@ -1390,10 +1444,10 @@ fn sync_node_views(
                         body.spawn((
                             Node {
                                 width: Val::Percent(100.0),
-                                padding: UiRect::all(Val::Px(8.0)),
-                                margin: UiRect::bottom(Val::Px(4.0)),
-                                min_height: Val::Px(72.0),
-                                border_radius: BorderRadius::all(Val::Px(6.0)),
+                                padding: UiRect::all(Val::Px(scaled(8.0, zoom))),
+                                margin: UiRect::bottom(Val::Px(scaled(4.0, zoom))),
+                                min_height: Val::Px(scaled(72.0, zoom)),
+                                border_radius: BorderRadius::all(Val::Px(scaled(6.0, zoom))),
                                 ..default()
                             },
                             BackgroundColor(Color::srgb_u8(58, 60, 67)),
@@ -1403,7 +1457,7 @@ fn sync_node_views(
                             panel.spawn((
                                 Text::new(inline_editor_value_text(&editing)),
                                 TextFont {
-                                    font_size: 16.0,
+                                    font_size: scaled_font(16.0, zoom),
                                     ..default()
                                 },
                                 TextColor(Color::srgb_u8(229, 232, 238)),
@@ -1414,11 +1468,11 @@ fn sync_node_views(
                         body.spawn((
                             Node {
                                 width: Val::Percent(100.0),
-                                padding: UiRect::axes(Val::Px(8.0), Val::Px(6.0)),
-                                margin: UiRect::bottom(Val::Px(2.0)),
+                                padding: UiRect::axes(Val::Px(scaled(8.0, zoom)), Val::Px(scaled(6.0, zoom))),
+                                margin: UiRect::bottom(Val::Px(scaled(2.0, zoom))),
                                 flex_direction: FlexDirection::Column,
-                                row_gap: Val::Px(2.0),
-                                border_radius: BorderRadius::all(Val::Px(6.0)),
+                                row_gap: Val::Px(scaled(2.0, zoom)),
+                                border_radius: BorderRadius::all(Val::Px(scaled(6.0, zoom))),
                                 ..default()
                             },
                             BackgroundColor(Color::srgb_u8(43, 45, 50)),
@@ -1428,7 +1482,7 @@ fn sync_node_views(
                             panel.spawn((
                                 Text::new("Editor"),
                                 TextFont {
-                                    font_size: 10.0,
+                                    font_size: scaled_font(10.0, zoom),
                                     ..default()
                                 },
                                 TextColor(Color::srgb_u8(132, 138, 149)),
@@ -1439,7 +1493,7 @@ fn sync_node_views(
                                     "Type directly into this node.\nCmd/Ctrl+Enter saves.\nEsc or Cancel discards.",
                                 ),
                                 TextFont {
-                                    font_size: 11.0,
+                                    font_size: scaled_font(11.0, zoom),
                                     ..default()
                                 },
                                 TextColor(Color::srgb_u8(150, 156, 167)),
@@ -1448,12 +1502,12 @@ fn sync_node_views(
                         });
                     } else {
                         for line in
-                            node_body_lines(&graph, node_id, &node_snapshot.kind, is_text_editing, &editing)
+                            node_body_lines(&document, node_id, &node_snapshot, is_text_editing, &editing)
                         {
                             body.spawn((
                                 Text::new(line),
                                 TextFont {
-                                    font_size: 13.0,
+                                    font_size: scaled_font(13.0, zoom),
                                     ..default()
                                 },
                                 TextColor(Color::srgb_u8(176, 181, 190)),
@@ -1466,16 +1520,22 @@ fn sync_node_views(
                         body.spawn(Node {
                             width: Val::Percent(100.0),
                             display: Display::Flex,
-                            column_gap: Val::Px(8.0),
-                            margin: UiRect::top(Val::Px(4.0)),
+                            column_gap: Val::Px(scaled(8.0, zoom)),
+                            margin: UiRect::top(Val::Px(scaled(4.0, zoom))),
                             ..default()
                         })
                         .with_children(|row| {
-                            spawn_node_action_button(row, "Save", NodeAction::SaveText(node_id));
-                            spawn_node_action_button(
+                            spawn_scaled_node_action_button(
+                                row,
+                                "Save",
+                                NodeAction::SaveText(node_id),
+                                zoom,
+                            );
+                            spawn_scaled_node_action_button(
                                 row,
                                 "Cancel",
                                 NodeAction::CancelText(node_id),
+                                zoom,
                             );
                         });
                     } else if is_selected && is_cycle_node {
@@ -1483,25 +1543,32 @@ fn sync_node_views(
                             width: Val::Percent(100.0),
                             display: Display::Flex,
                             flex_wrap: FlexWrap::Wrap,
-                            column_gap: Val::Px(8.0),
-                            row_gap: Val::Px(8.0),
-                            margin: UiRect::top(Val::Px(4.0)),
+                            column_gap: Val::Px(scaled(8.0, zoom)),
+                            row_gap: Val::Px(scaled(8.0, zoom)),
+                            margin: UiRect::top(Val::Px(scaled(4.0, zoom))),
                             ..default()
                         })
                         .with_children(|row| {
                             if is_model_node {
-                                spawn_node_action_button(
+                                spawn_scaled_node_action_button(
                                     row,
                                     "Refresh",
                                     NodeAction::RefreshModels(node_id),
+                                    zoom,
                                 );
                             }
-                            spawn_node_action_button(
+                            spawn_scaled_node_action_button(
                                 row,
                                 "Prev",
                                 NodeAction::PreviousSetting(node_id),
+                                zoom,
                             );
-                            spawn_node_action_button(row, "Next", NodeAction::NextSetting(node_id));
+                            spawn_scaled_node_action_button(
+                                row,
+                                "Next",
+                                NodeAction::NextSetting(node_id),
+                                zoom,
+                            );
                         });
                     }
 
@@ -1510,35 +1577,39 @@ fn sync_node_views(
                             width: Val::Percent(100.0),
                             display: Display::Flex,
                             flex_wrap: FlexWrap::Wrap,
-                            column_gap: Val::Px(8.0),
-                            row_gap: Val::Px(8.0),
-                            margin: UiRect::top(Val::Px(4.0)),
+                            column_gap: Val::Px(scaled(8.0, zoom)),
+                            row_gap: Val::Px(scaled(8.0, zoom)),
+                            margin: UiRect::top(Val::Px(scaled(4.0, zoom))),
                             ..default()
                         })
                         .with_children(|row| {
                             if is_agent_node {
-                                spawn_node_action_button(
+                                spawn_scaled_node_action_button(
                                     row,
                                     "Run",
                                     NodeAction::RunAgent(node_id),
+                                    zoom,
                                 );
                             }
                             if is_output_node {
-                                spawn_node_action_button(
+                                spawn_scaled_node_action_button(
                                     row,
                                     "Clear",
                                     NodeAction::ClearOutput(node_id),
+                                    zoom,
                                 );
                             }
-                            spawn_node_action_button(
+                            spawn_scaled_node_action_button(
                                 row,
                                 "Duplicate",
                                 NodeAction::DuplicateNode(node_id),
+                                zoom,
                             );
-                            spawn_node_action_button(
+                            spawn_scaled_node_action_button(
                                 row,
                                 "Delete",
                                 NodeAction::DeleteNode(node_id),
+                                zoom,
                             );
                         });
                     }
@@ -1548,19 +1619,25 @@ fn sync_node_views(
         registry.node_views.insert(node_id, root);
     }
 
-    registry.last_graph_revision = graph.revision;
+    registry.last_graph_revision = document.revision;
     registry.last_edit_revision = editing.revision;
+    registry.last_zoom = session.zoom;
 }
 
-fn spawn_port_button(parent: &mut ChildSpawnerCommands, address: PortAddress, ty: PortType) {
+fn spawn_port_button(
+    parent: &mut ChildSpawnerCommands,
+    address: PortAddress,
+    ty: PortType,
+    zoom: f32,
+) {
     parent
         .spawn((
             Button,
             Node {
-                width: Val::Px(PORT_DOT_SIZE),
-                height: Val::Px(PORT_DOT_SIZE),
+                width: Val::Px(scaled(PORT_DOT_SIZE, zoom)),
+                height: Val::Px(scaled(PORT_DOT_SIZE, zoom)),
                 border: UiRect::all(Val::Px(1.0)),
-                border_radius: BorderRadius::all(Val::Px(PORT_DOT_SIZE)),
+                border_radius: BorderRadius::all(Val::Px(scaled(PORT_DOT_SIZE, zoom))),
                 ..default()
             },
             BackgroundColor(port_color(ty)),
@@ -1568,58 +1645,57 @@ fn spawn_port_button(parent: &mut ChildSpawnerCommands, address: PortAddress, ty
         ))
         .observe(
             move |mut click: On<Pointer<Click>>,
-                  mut graph: ResMut<GraphEditorState>,
+                  mut document: ResMut<GraphDocument>,
+                  mut session: ResMut<EditorSession>,
                   mut editing: ResMut<TextEditingState>| {
                 if click.button != PointerButton::Primary {
                     return;
                 }
 
                 click.propagate(false);
-                select_node_for_editing(&mut graph, &mut editing, address.node);
+                select_node_for_editing(&mut document, &mut session, &mut editing, address.node);
 
-                if let Some(dragging) = graph.dragging_wire {
+                if let Some(dragging) = session.dragging_wire {
                     if dragging.from == address {
-                        graph.dragging_wire = None;
+                        session.dragging_wire = None;
+                        session.touch();
                         return;
                     }
 
-                    if graph.connect(dragging.from, address) {
-                        graph.dragging_wire = None;
-                    } else if let Some(spec) = graph.port_spec(address) {
-                        graph.dragging_wire = Some(DraggingWire {
+                    if document.connect(dragging.from, address) {
+                        session.dragging_wire = None;
+                        session.touch();
+                    } else if let Some(spec) = document.port_spec(address) {
+                        session.dragging_wire = Some(DraggingWire {
                             from: address,
                             ty: spec.ty,
                         });
+                        session.touch();
                     }
-                } else if let Some(spec) = graph.port_spec(address) {
-                    graph.dragging_wire = Some(DraggingWire {
+                } else if let Some(spec) = document.port_spec(address) {
+                    session.dragging_wire = Some(DraggingWire {
                         from: address,
                         ty: spec.ty,
                     });
+                    session.touch();
                 }
             },
         );
 }
 
 fn update_node_view_state(
-    graph: Res<GraphEditorState>,
-    mut nodes: Query<(
-        &NodeView,
-        &mut Node,
-        &mut BorderColor,
-        &mut GlobalZIndex,
-        &mut UiTransform,
-    )>,
+    document: Res<GraphDocument>,
+    session: Res<EditorSession>,
+    mut nodes: Query<(&NodeView, &mut Node, &mut BorderColor, &mut GlobalZIndex)>,
     mut headers: Query<(&NodeHeaderView, &mut BackgroundColor)>,
 ) {
-    for (view, mut node_style, mut border, mut z_index, mut transform) in &mut nodes {
-        let Some(node) = graph.node(view.id) else {
+    for (view, mut node_style, mut border, mut z_index) in &mut nodes {
+        let Some(node) = document.node(view.id) else {
             continue;
         };
 
-        *node_style = node_root_style(node, graph.pan, graph.zoom);
-        *transform = UiTransform::from_scale(Vec2::splat(graph.zoom));
-        let selected = graph.selected_node == Some(view.id);
+        *node_style = node_root_style(node, session.pan, session.zoom);
+        let selected = session.selected_node == Some(view.id);
         border.set_all(if selected {
             Color::srgb_u8(248, 205, 88)
         } else {
@@ -1629,7 +1705,7 @@ fn update_node_view_state(
     }
 
     for (header, mut color) in &mut headers {
-        color.0 = if graph.selected_node == Some(header.id) {
+        color.0 = if session.selected_node == Some(header.id) {
             Color::srgb_u8(90, 90, 96)
         } else {
             Color::srgb_u8(74, 74, 78)
@@ -1638,7 +1714,8 @@ fn update_node_view_state(
 }
 
 fn update_chrome_text(
-    graph: Res<GraphEditorState>,
+    document: Res<GraphDocument>,
+    session: Res<EditorSession>,
     runtime: Res<RigEditorRuntime>,
     editing: Res<TextEditingState>,
     palette: Res<NodePaletteState>,
@@ -1651,10 +1728,10 @@ fn update_chrome_text(
                 .pending_request
                 .map(|request_id| format!("running #{request_id}"))
                 .unwrap_or_else(|| "idle".into());
-            let selection_status = graph
+            let selection_status = session
                 .selected_node
-                .and_then(|node_id| graph.node(node_id))
-                .map(|node| node.kind.title().to_string())
+                .and_then(|node_id| document.node(node_id))
+                .map(|node| node.title.clone())
                 .unwrap_or_else(|| "no selection".into());
             let palette_status = if palette.visible {
                 "palette open"
@@ -1671,7 +1748,7 @@ fn update_chrome_text(
                 runtime.ollama_models.len(),
                 run_status,
                 selection_status,
-                graph.zoom * 100.0,
+                session.zoom * 100.0,
                 if editing.target.is_some() {
                     "editing"
                 } else {
@@ -1683,12 +1760,12 @@ fn update_chrome_text(
 
     if let Some(entity) = registry.inspector_title_text {
         if let Ok(mut text) = texts.get_mut(entity) {
-            let selected_title = graph
+            let selected_title = session
                 .selected_node
-                .and_then(|node_id| graph.node(node_id))
-                .map(|node| node.kind.title().to_string())
+                .and_then(|node_id| document.node(node_id))
+                .map(|node| node.title.clone())
                 .unwrap_or_else(|| "Inspector".into());
-            text.0 = if graph.selected_node.is_some() {
+            text.0 = if session.selected_node.is_some() {
                 format!("{selected_title} Inspector")
             } else {
                 "Inspector".into()
@@ -1698,22 +1775,24 @@ fn update_chrome_text(
 
     if let Some(entity) = registry.inspector_body_text {
         if let Ok(mut text) = texts.get_mut(entity) {
-            text.0 = inspector_text(&graph, &runtime);
+            text.0 = inspector_text(&document, &session, &runtime);
         }
     }
 }
 
 fn rebuild_canvas_overlay(
     mut commands: Commands,
-    graph: Res<GraphEditorState>,
+    document: Res<GraphDocument>,
+    session: Res<EditorSession>,
     mut registry: ResMut<GraphUiRegistry>,
-    canvas_query: Query<(&ComputedNode, &RelativeCursorPosition), With<CanvasSurface>>,
+    canvas_query: Query<(&ComputedNode, &UiGlobalTransform, &RelativeCursorPosition), With<CanvasSurface>>,
+    windows: Query<&Window, With<PrimaryWindow>>,
 ) {
     let (Some(overlay_layer), Some(canvas)) = (registry.overlay_layer, registry.canvas) else {
         return;
     };
 
-    let Ok((canvas_node, cursor)) = canvas_query.get(canvas) else {
+    let Ok((canvas_node, _canvas_transform, _relative_cursor)) = canvas_query.get(canvas) else {
         return;
     };
 
@@ -1728,18 +1807,18 @@ fn rebuild_canvas_overlay(
         overlay_layer,
         &mut registry.overlay_entities,
         canvas_size,
-        graph.pan,
-        graph.zoom,
+        session.pan,
+        session.zoom,
     );
 
-    for edge in &graph.edges {
-        let Some(start) = port_center(&graph, edge.from) else {
+    for edge in document.iter_edges() {
+        let Some(start) = port_center(&document, &session, edge.from) else {
             continue;
         };
-        let Some(end) = port_center(&graph, edge.to) else {
+        let Some(end) = port_center(&document, &session, edge.to) else {
             continue;
         };
-        let color = graph
+        let color = document
             .port_spec(edge.from)
             .map(|spec| port_color(spec.ty))
             .unwrap_or(Color::srgb_u8(160, 164, 172));
@@ -1750,14 +1829,13 @@ fn rebuild_canvas_overlay(
             start,
             end,
             color,
-            (WIRE_THICKNESS * graph.zoom).clamp(1.5, 6.0),
+            (WIRE_THICKNESS * session.zoom).clamp(1.5, 6.0),
         );
     }
 
-    if let Some(dragging) = graph.dragging_wire {
-        if let Some(pointer) = cursor.normalized {
-            let pointer = (pointer + Vec2::splat(0.5)) * canvas_size;
-            if let Some(start) = port_center(&graph, dragging.from) {
+    if let Some(dragging) = session.dragging_wire {
+        if let Some(pointer) = current_canvas_cursor_local_position(&windows, &canvas_query) {
+            if let Some(start) = port_center(&document, &session, dragging.from) {
                 spawn_wire_segment(
                     &mut commands,
                     overlay_layer,
@@ -1765,11 +1843,35 @@ fn rebuild_canvas_overlay(
                     start,
                     pointer,
                     port_color(dragging.ty),
-                    (WIRE_THICKNESS * graph.zoom).clamp(1.5, 6.0),
+                    (WIRE_THICKNESS * session.zoom).clamp(1.5, 6.0),
                 );
             }
         }
     }
+}
+
+fn current_canvas_cursor_local_position(
+    windows: &Query<&Window, With<PrimaryWindow>>,
+    canvas_query: &Query<(&ComputedNode, &UiGlobalTransform, &RelativeCursorPosition), With<CanvasSurface>>,
+) -> Option<Vec2> {
+    let window = windows.single().ok()?;
+    let cursor = window.cursor_position()?;
+    canvas_local_from_window_position(canvas_query, cursor)
+}
+
+fn canvas_local_from_window_position(
+    canvas_query: &Query<(&ComputedNode, &UiGlobalTransform, &RelativeCursorPosition), With<CanvasSurface>>,
+    window_position: Vec2,
+) -> Option<Vec2> {
+    let (canvas_node, canvas_transform, relative_cursor) = canvas_query.single().ok()?;
+    if !relative_cursor.cursor_over() {
+        return None;
+    }
+    let normalized = canvas_node.normalize_point(*canvas_transform, window_position)?;
+    if normalized.x < -0.5 || normalized.x > 0.5 || normalized.y < -0.5 || normalized.y > 0.5 {
+        return None;
+    }
+    Some((normalized + Vec2::splat(0.5)) * canvas_node.size())
 }
 
 fn spawn_grid_lines(
@@ -1875,28 +1977,43 @@ fn grid_line_node(center: Vec2, size: Vec2, color: Color) -> impl Bundle {
     )
 }
 
+fn scaled(value: f32, zoom: f32) -> f32 {
+    value * zoom.max(0.001)
+}
+
+fn scaled_font(value: f32, zoom: f32) -> f32 {
+    scaled(value, zoom).max(6.0)
+}
+
+fn world_to_screen(point: Vec2, pan: Vec2, zoom: f32) -> Vec2 {
+    pan + point * zoom.max(0.001)
+}
+
+fn screen_to_world(point: Vec2, pan: Vec2, zoom: f32) -> Vec2 {
+    (point - pan) / zoom.max(0.001)
+}
+
 fn node_root_style(node: &GraphNode, pan: Vec2, zoom: f32) -> Node {
-    let size = node_dimensions(&node.kind);
-    let visual_left = node.position.x * zoom + pan.x;
-    let visual_top = node.position.y * zoom + pan.y;
+    let size = node_dimensions(node);
+    let visual_position = world_to_screen(node.position, pan, zoom);
     Node {
         position_type: PositionType::Absolute,
-        left: Val::Px(visual_left + size.x * (zoom - 1.0) * 0.5),
-        top: Val::Px(visual_top + size.y * (zoom - 1.0) * 0.5),
-        width: Val::Px(size.x),
-        min_height: Val::Px(size.y),
+        left: Val::Px(visual_position.x),
+        top: Val::Px(visual_position.y),
+        width: Val::Px(size.x * zoom),
+        height: Val::Px(size.y * zoom),
         flex_direction: FlexDirection::Column,
         border: UiRect::all(Val::Px(1.0)),
-        border_radius: BorderRadius::all(Val::Px(12.0)),
+        border_radius: BorderRadius::all(Val::Px(scaled(12.0, zoom))),
         ..default()
     }
 }
 
-fn node_dimensions(kind: &NodeKind) -> Vec2 {
-    let row_count = kind.inputs().len().max(kind.outputs().len()).max(1) as f32;
-    let body_rows = match kind {
-        NodeKind::Agent => 18.0,
-        _ => kind.summary_lines().len() as f32,
+fn node_dimensions(node: &GraphNode) -> Vec2 {
+    let row_count = node.inputs().len().max(node.outputs().len()).max(1) as f32;
+    let body_rows = match node.node_type {
+        NodeType::Agent => 18.0,
+        _ => node.summary_lines().len() as f32,
     };
     let height = NODE_HEADER_HEIGHT
         + 16.0
@@ -1906,24 +2023,31 @@ fn node_dimensions(kind: &NodeKind) -> Vec2 {
     Vec2::new(NODE_WIDTH, height.max(170.0))
 }
 
-fn port_center(graph: &GraphEditorState, address: PortAddress) -> Option<Vec2> {
-    let node = graph.node(address.node)?;
+fn port_center(
+    document: &GraphDocument,
+    session: &EditorSession,
+    address: PortAddress,
+) -> Option<Vec2> {
+    let node = document.node(address.node)?;
     let row = address.index as f32;
-    let zoom = graph.zoom;
-    let visual_left = node.position.x * zoom + graph.pan.x;
-    let visual_top = node.position.y * zoom + graph.pan.y;
-    let y = visual_top + (NODE_HEADER_HEIGHT + 26.0 + row * (PORT_ROW_HEIGHT + 4.0)) * zoom;
+    let zoom = session.zoom.max(0.001);
+    let visual_position = world_to_screen(node.position, session.pan, zoom);
+    let y = visual_position.y
+        + scaled(NODE_HEADER_HEIGHT, zoom)
+        + scaled(10.0, zoom)
+        + scaled(PORT_ROW_HEIGHT * 0.5, zoom)
+        + row * scaled(PORT_ROW_HEIGHT + 4.0, zoom);
     let x = match address.direction {
-        PortDirection::Input => visual_left + PORT_X_OFFSET * zoom,
-        PortDirection::Output => visual_left + (NODE_WIDTH - PORT_X_OFFSET) * zoom,
+        PortDirection::Input => visual_position.x + scaled(PORT_X_OFFSET, zoom),
+        PortDirection::Output => visual_position.x + scaled(NODE_WIDTH - PORT_X_OFFSET, zoom),
     };
     Some(Vec2::new(x, y))
 }
 
 fn node_body_lines(
-    graph: &GraphEditorState,
+    document: &GraphDocument,
     node_id: NodeId,
-    kind: &NodeKind,
+    node: &GraphNode,
     is_text_editing: bool,
     editing: &TextEditingState,
 ) -> Vec<String> {
@@ -1941,11 +2065,11 @@ fn node_body_lines(
         return lines;
     }
 
-    if matches!(kind, NodeKind::Agent) {
-        return agent_body_lines(graph, node_id);
+    if matches!(node.node_type, NodeType::Agent) {
+        return agent_body_lines(document, node_id);
     }
 
-    kind.summary_lines()
+    node.summary_lines()
 }
 
 fn inline_editor_value_text(editing: &TextEditingState) -> String {
@@ -1966,20 +2090,23 @@ fn filtered_node_templates(search: &str) -> Vec<NodeTemplate> {
         .collect()
 }
 
-fn agent_body_lines(graph: &GraphEditorState, node_id: NodeId) -> Vec<String> {
+fn agent_body_lines(document: &GraphDocument, node_id: NodeId) -> Vec<String> {
     let mut lines = Vec::new();
     push_agent_group(
         &mut lines,
         "Core",
         [
-            ("model", port_status(graph, node_id, PortType::Model, true)),
+            (
+                "model",
+                port_status(document, node_id, PortType::Model, true),
+            ),
             (
                 "prompt",
-                port_status(graph, node_id, PortType::Prompt, true),
+                port_status(document, node_id, PortType::Prompt, true),
             ),
             (
                 "text output",
-                if graph
+                if document
                     .output_targets(node_id, PortType::TextResponse)
                     .is_empty()
                 {
@@ -1987,7 +2114,9 @@ fn agent_body_lines(graph: &GraphEditorState, node_id: NodeId) -> Vec<String> {
                 } else {
                     format!(
                         "{} sink",
-                        graph.output_targets(node_id, PortType::TextResponse).len()
+                        document
+                            .output_targets(node_id, PortType::TextResponse)
+                            .len()
                     )
                 },
             ),
@@ -1999,15 +2128,15 @@ fn agent_body_lines(graph: &GraphEditorState, node_id: NodeId) -> Vec<String> {
         [
             (
                 "name",
-                port_status(graph, node_id, PortType::AgentName, false),
+                port_status(document, node_id, PortType::AgentName, false),
             ),
             (
                 "description",
-                port_status(graph, node_id, PortType::AgentDescription, false),
+                port_status(document, node_id, PortType::AgentDescription, false),
             ),
             (
                 "preamble",
-                port_status(graph, node_id, PortType::Preamble, false),
+                port_status(document, node_id, PortType::Preamble, false),
             ),
         ],
     );
@@ -2017,11 +2146,11 @@ fn agent_body_lines(graph: &GraphEditorState, node_id: NodeId) -> Vec<String> {
         [
             (
                 "static_context",
-                multi_port_status(graph, node_id, PortType::StaticContext),
+                multi_port_status(document, node_id, PortType::StaticContext),
             ),
             (
                 "dynamic_context",
-                multi_port_status(graph, node_id, PortType::DynamicContext),
+                multi_port_status(document, node_id, PortType::DynamicContext),
             ),
         ],
     );
@@ -2031,15 +2160,15 @@ fn agent_body_lines(graph: &GraphEditorState, node_id: NodeId) -> Vec<String> {
         [
             (
                 "temperature",
-                port_status(graph, node_id, PortType::Temperature, false),
+                port_status(document, node_id, PortType::Temperature, false),
             ),
             (
                 "max_tokens",
-                port_status(graph, node_id, PortType::MaxTokens, false),
+                port_status(document, node_id, PortType::MaxTokens, false),
             ),
             (
                 "default_max_turns",
-                port_status(graph, node_id, PortType::DefaultMaxTurns, false),
+                port_status(document, node_id, PortType::DefaultMaxTurns, false),
             ),
         ],
     );
@@ -2049,16 +2178,19 @@ fn agent_body_lines(graph: &GraphEditorState, node_id: NodeId) -> Vec<String> {
         [
             (
                 "additional_params",
-                port_status(graph, node_id, PortType::AdditionalParams, false),
+                port_status(document, node_id, PortType::AdditionalParams, false),
             ),
             (
                 "tool_server_handle",
-                port_status(graph, node_id, PortType::ToolServerHandle, false),
+                port_status(document, node_id, PortType::ToolServerHandle, false),
             ),
-            ("hook", port_status(graph, node_id, PortType::Hook, false)),
+            (
+                "hook",
+                port_status(document, node_id, PortType::Hook, false),
+            ),
             (
                 "output_schema",
-                port_status(graph, node_id, PortType::OutputSchema, false),
+                port_status(document, node_id, PortType::OutputSchema, false),
             ),
         ],
     );
@@ -2076,8 +2208,8 @@ fn push_agent_group<const N: usize>(
     }
 }
 
-fn port_status(graph: &GraphEditorState, node_id: NodeId, ty: PortType, required: bool) -> String {
-    let count = graph.input_sources(node_id, ty).len();
+fn port_status(document: &GraphDocument, node_id: NodeId, ty: PortType, required: bool) -> String {
+    let count = document.input_sources(node_id, ty).len();
     if count == 0 {
         if required {
             "missing".into()
@@ -2089,8 +2221,8 @@ fn port_status(graph: &GraphEditorState, node_id: NodeId, ty: PortType, required
     }
 }
 
-fn multi_port_status(graph: &GraphEditorState, node_id: NodeId, ty: PortType) -> String {
-    let count = graph.input_sources(node_id, ty).len();
+fn multi_port_status(document: &GraphDocument, node_id: NodeId, ty: PortType) -> String {
+    let count = document.input_sources(node_id, ty).len();
     if count == 0 {
         "optional".into()
     } else {
@@ -2098,13 +2230,17 @@ fn multi_port_status(graph: &GraphEditorState, node_id: NodeId, ty: PortType) ->
     }
 }
 
-fn inspector_text(graph: &GraphEditorState, runtime: &RigEditorRuntime) -> String {
-    let Some(selected) = graph.selected_node else {
+fn inspector_text(
+    document: &GraphDocument,
+    session: &EditorSession,
+    runtime: &RigEditorRuntime,
+) -> String {
+    let Some(selected) = session.selected_node else {
         return format!(
             "No node selected.\n\nGraph\n• nodes: {}\n• edges: {}\n• zoom: {:.0}%\n\nRuntime\n• Ollama: {}\n• endpoint: {}\n• {}\n\nUse Space or right-click to add nodes.",
-            graph.nodes.len(),
-            graph.edges.len(),
-            graph.zoom * 100.0,
+            document.node_count(),
+            document.edge_count(),
+            session.zoom * 100.0,
             if runtime.ollama_ready {
                 "ready"
             } else {
@@ -2115,25 +2251,25 @@ fn inspector_text(graph: &GraphEditorState, runtime: &RigEditorRuntime) -> Strin
         );
     };
 
-    let Some(node) = graph.node(selected) else {
+    let Some(node) = document.node(selected) else {
         return "Selection no longer exists.".into();
     };
 
-    let incoming = node.kind.inputs().len();
-    let outgoing = node.kind.outputs().len();
+    let incoming = node.inputs().len();
+    let outgoing = node.outputs().len();
     let mut lines = vec![
         format!("Node\n• id: {}", node.id),
-        format!("• kind: {}", node.kind.title()),
+        format!("• kind: {}", node.title),
         format!("• position: {:.0}, {:.0}", node.position.x, node.position.y),
         format!("• input ports: {incoming}"),
         format!("• output ports: {outgoing}"),
     ];
 
-    match &node.kind {
-        NodeKind::Agent => {
+    match &node.value {
+        NodeValue::None if matches!(node.node_type, NodeType::Agent) => {
             lines.push(String::new());
             lines.push("Validation".into());
-            match compile_agent_run(graph, runtime, node.id) {
+            match compile_agent_run(document, runtime, node.id) {
                 Ok(run) => {
                     lines.push("• ready to run".into());
                     lines.push(format!("• model: {}", run.model));
@@ -2146,7 +2282,7 @@ fn inspector_text(graph: &GraphEditorState, runtime: &RigEditorRuntime) -> Strin
                 Err(error) => lines.push(format!("• {error}")),
             }
         }
-        NodeKind::Model { model_name, .. } => {
+        NodeValue::Model { model_name, .. } => {
             lines.push(String::new());
             lines.push("Provider".into());
             lines.push(format!(
@@ -2164,7 +2300,7 @@ fn inspector_text(graph: &GraphEditorState, runtime: &RigEditorRuntime) -> Strin
             ));
             lines.push(format!("• discovered: {}", runtime.ollama_models.len()));
         }
-        NodeKind::TextOutput { status, text, .. } => {
+        NodeValue::TextOutput { status, text } => {
             lines.push(String::new());
             lines.push("Output".into());
             lines.push(format!("• status: {status}"));
@@ -2172,7 +2308,7 @@ fn inspector_text(graph: &GraphEditorState, runtime: &RigEditorRuntime) -> Strin
             lines.extend(preview_multiline(text, 8));
         }
         _ => {
-            if let Some(text) = node.kind.editable_text() {
+            if let Some(text) = node.editable_text() {
                 lines.push(String::new());
                 lines.push("Content".into());
                 lines.extend(preview_multiline(text, 8));
@@ -2218,7 +2354,7 @@ fn button_background(interaction: Interaction) -> Color {
 fn port_color(port_type: PortType) -> Color {
     match port_type {
         PortType::Model => Color::srgb_u8(183, 149, 255),
-        PortType::Prompt => Color::srgb_u8(245, 211, 61),
+        PortType::Prompt | PortType::TextValue => Color::srgb_u8(245, 211, 61),
         PortType::TextResponse => Color::srgb_u8(109, 193, 255),
         PortType::Preamble | PortType::StaticContext => Color::srgb_u8(124, 201, 151),
         PortType::Temperature | PortType::MaxTokens | PortType::DefaultMaxTurns => {
