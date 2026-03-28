@@ -611,6 +611,7 @@ pub struct GraphEditorState {
     pub nodes: Vec<GraphNode>,
     pub edges: Vec<GraphEdge>,
     pub pan: Vec2,
+    pub zoom: f32,
     pub selected_node: Option<NodeId>,
     pub dragging_wire: Option<DraggingWire>,
     pub revision: u64,
@@ -629,6 +630,7 @@ impl GraphEditorState {
             nodes: Vec::new(),
             edges: Vec::new(),
             pan: Vec2::new(360.0, 120.0),
+            zoom: 1.0,
             selected_node: None,
             dragging_wire: None,
             revision: 1,
@@ -727,7 +729,6 @@ impl GraphEditorState {
     pub fn move_node(&mut self, node_id: NodeId, delta: Vec2) {
         if let Some(node) = self.nodes.iter_mut().find(|node| node.id == node_id) {
             node.position += delta;
-            self.touch();
         }
     }
 

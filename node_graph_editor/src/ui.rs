@@ -5,6 +5,7 @@ use bevy::{
     input::{
         ButtonState,
         keyboard::{KeyCode, KeyboardInput},
+        mouse::{MouseScrollUnit, MouseWheel},
     },
     math::Rot2,
     prelude::*,
@@ -43,6 +44,7 @@ impl Plugin for NodeGraphEditorPlugin {
                 (
                     handle_editor_buttons,
                     handle_text_edit_input,
+                    handle_canvas_zoom,
                     sync_node_views,
                     update_node_view_state,
                     update_sidebar_text,
@@ -299,6 +301,7 @@ fn setup_editor_ui(mut commands: Commands, mut registry: ResMut<GraphUiRegistry>
                 "Controls\n\
                  • Left-drag node headers to move them\n\
                  • Middle-drag the canvas to pan\n\
+                 • Cmd/Ctrl + scroll to zoom the canvas\n\
                  • Click one port, then another compatible port to connect\n\
                  • Edit text nodes in the sidebar\n\
                  • Run the selected Agent node to produce Text Output",
@@ -566,8 +569,8 @@ fn handle_editor_buttons(
                     .map(|node| node.position + Vec2::new(420.0, 24.0))
                     .unwrap_or_else(|| {
                         Vec2::new(
-                            180.0 - graph.pan.x + (slot.rem_euclid(3.0) * 36.0),
-                            120.0 - graph.pan.y + ((slot / 3.0).floor() * 28.0),
+                            (180.0 - graph.pan.x + (slot.rem_euclid(3.0) * 36.0)) / graph.zoom,
+                            (120.0 - graph.pan.y + ((slot / 3.0).floor() * 28.0)) / graph.zoom,
                         )
                     });
                 graph.add_node(template.instantiate(), spawn);
@@ -620,6 +623,53 @@ fn handle_text_edit_input(
     }
 }
 
+fn handle_canvas_zoom(
+    mut wheel_events: MessageReader<MouseWheel>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut graph: ResMut<GraphEditorState>,
+    canvas_query: Query<(&ComputedNode, &RelativeCursorPosition), With<CanvasSurface>>,
+) {
+    let modifier_pressed = keys.any_pressed([
+        KeyCode::SuperLeft,
+        KeyCode::SuperRight,
+        KeyCode::ControlLeft,
+        KeyCode::ControlRight,
+    ]);
+    if !modifier_pressed {
+        return;
+    }
+
+    let Ok((canvas_node, cursor)) = canvas_query.single() else {
+        return;
+    };
+    let Some(pointer) = cursor.normalized else {
+        return;
+    };
+
+    let mut scroll_delta = 0.0;
+    for event in wheel_events.read() {
+        scroll_delta += match event.unit {
+            MouseScrollUnit::Line => event.y,
+            MouseScrollUnit::Pixel => event.y * 0.05,
+        };
+    }
+    if scroll_delta.abs() < f32::EPSILON {
+        return;
+    }
+
+    let canvas_size = canvas_node.size();
+    let pointer_screen = (pointer + Vec2::splat(0.5)) * canvas_size;
+    let old_zoom = graph.zoom.max(0.001);
+    let new_zoom = (old_zoom * 1.1_f32.powf(scroll_delta)).clamp(0.4, 2.5);
+    if (new_zoom - old_zoom).abs() < f32::EPSILON {
+        return;
+    }
+
+    let world_at_pointer = (pointer_screen - graph.pan) / old_zoom;
+    graph.zoom = new_zoom;
+    graph.pan = pointer_screen - world_at_pointer * new_zoom;
+}
+
 fn sync_node_views(
     mut commands: Commands,
     graph: Res<GraphEditorState>,
@@ -644,10 +694,11 @@ fn sync_node_views(
         let root = commands
             .spawn((
                 NodeView { id: node_id },
-                node_root_style(&node_snapshot, graph.pan),
+                node_root_style(&node_snapshot, graph.pan, graph.zoom),
                 BackgroundColor(Color::srgb_u8(58, 58, 61)),
                 BorderColor::all(Color::srgb_u8(74, 76, 82)),
                 GlobalZIndex(4),
+                UiTransform::from_scale(Vec2::splat(graph.zoom)),
             ))
             .observe(
                 move |mut click: On<Pointer<Click>>, mut graph: ResMut<GraphEditorState>| {
@@ -695,7 +746,8 @@ fn sync_node_views(
                         if drag.button == PointerButton::Primary {
                             drag.propagate(false);
                             graph.selected_node = Some(node_id);
-                            graph.move_node(node_id, drag.delta);
+                            let zoom = graph.zoom.max(0.001);
+                            graph.move_node(node_id, drag.delta / zoom);
                         }
                     },
                 )
@@ -890,15 +942,22 @@ fn spawn_port_button(parent: &mut ChildSpawnerCommands, address: PortAddress, ty
 
 fn update_node_view_state(
     graph: Res<GraphEditorState>,
-    mut nodes: Query<(&NodeView, &mut Node, &mut BorderColor, &mut GlobalZIndex)>,
+    mut nodes: Query<(
+        &NodeView,
+        &mut Node,
+        &mut BorderColor,
+        &mut GlobalZIndex,
+        &mut UiTransform,
+    )>,
     mut headers: Query<(&NodeHeaderView, &mut BackgroundColor)>,
 ) {
-    for (view, mut node_style, mut border, mut z_index) in &mut nodes {
+    for (view, mut node_style, mut border, mut z_index, mut transform) in &mut nodes {
         let Some(node) = graph.node(view.id) else {
             continue;
         };
 
-        *node_style = node_root_style(node, graph.pan);
+        *node_style = node_root_style(node, graph.pan, graph.zoom);
+        *transform = UiTransform::from_scale(Vec2::splat(graph.zoom));
         let selected = graph.selected_node == Some(view.id);
         border.set_all(if selected {
             Color::srgb_u8(248, 205, 88)
@@ -952,12 +1011,13 @@ fn update_sidebar_text(
                 .map(|node_id| format!("editing node {node_id}"))
                 .unwrap_or_else(|| "not editing".into());
             text.0 = format!(
-                "Ollama: {}  •  {}  •  {}  •  nodes={} edges={}  •  {}",
+                "Ollama: {}  •  {}  •  {}  •  nodes={} edges={}  •  zoom={:.0}%  •  {}",
                 runtime.ollama_endpoint,
                 model_status,
                 pending,
                 graph.nodes.len(),
                 graph.edges.len(),
+                graph.zoom * 100.0,
                 editing_status
             );
         }
@@ -990,6 +1050,7 @@ fn rebuild_canvas_overlay(
         &mut registry.overlay_entities,
         canvas_size,
         graph.pan,
+        graph.zoom,
     );
 
     for edge in &graph.edges {
@@ -1010,7 +1071,7 @@ fn rebuild_canvas_overlay(
             start,
             end,
             color,
-            WIRE_THICKNESS,
+            (WIRE_THICKNESS * graph.zoom).clamp(1.5, 6.0),
         );
     }
 
@@ -1025,7 +1086,7 @@ fn rebuild_canvas_overlay(
                     start,
                     pointer,
                     port_color(dragging.ty),
-                    WIRE_THICKNESS,
+                    (WIRE_THICKNESS * graph.zoom).clamp(1.5, 6.0),
                 );
             }
         }
@@ -1038,15 +1099,17 @@ fn spawn_grid_lines(
     overlay_entities: &mut Vec<Entity>,
     canvas_size: Vec2,
     pan: Vec2,
+    zoom: f32,
 ) {
-    let offset_x = pan.x.rem_euclid(GRID_SPACING);
-    let offset_y = pan.y.rem_euclid(GRID_SPACING);
+    let spacing = (GRID_SPACING * zoom).max(10.0);
+    let offset_x = pan.x.rem_euclid(spacing);
+    let offset_y = pan.y.rem_euclid(spacing);
 
-    let columns = ((canvas_size.x / GRID_SPACING).ceil() as i32) + 2;
-    let rows = ((canvas_size.y / GRID_SPACING).ceil() as i32) + 2;
+    let columns = ((canvas_size.x / spacing).ceil() as i32) + 2;
+    let rows = ((canvas_size.y / spacing).ceil() as i32) + 2;
 
     for column in 0..columns {
-        let x = offset_x + column as f32 * GRID_SPACING;
+        let x = offset_x + column as f32 * spacing;
         let entity = commands
             .spawn(grid_line_node(
                 Vec2::new(x, canvas_size.y * 0.5),
@@ -1063,7 +1126,7 @@ fn spawn_grid_lines(
     }
 
     for row in 0..rows {
-        let y = offset_y + row as f32 * GRID_SPACING;
+        let y = offset_y + row as f32 * spacing;
         let entity = commands
             .spawn(grid_line_node(
                 Vec2::new(canvas_size.x * 0.5, y),
@@ -1133,12 +1196,14 @@ fn grid_line_node(center: Vec2, size: Vec2, color: Color) -> impl Bundle {
     )
 }
 
-fn node_root_style(node: &GraphNode, pan: Vec2) -> Node {
+fn node_root_style(node: &GraphNode, pan: Vec2, zoom: f32) -> Node {
     let size = node_dimensions(&node.kind);
+    let visual_left = node.position.x * zoom + pan.x;
+    let visual_top = node.position.y * zoom + pan.y;
     Node {
         position_type: PositionType::Absolute,
-        left: Val::Px(node.position.x + pan.x),
-        top: Val::Px(node.position.y + pan.y),
+        left: Val::Px(visual_left + size.x * (zoom - 1.0) * 0.5),
+        top: Val::Px(visual_top + size.y * (zoom - 1.0) * 0.5),
         width: Val::Px(size.x),
         min_height: Val::Px(size.y),
         flex_direction: FlexDirection::Column,
@@ -1162,11 +1227,13 @@ fn node_dimensions(kind: &NodeKind) -> Vec2 {
 fn port_center(graph: &GraphEditorState, address: PortAddress) -> Option<Vec2> {
     let node = graph.node(address.node)?;
     let row = address.index as f32;
-    let y =
-        node.position.y + graph.pan.y + NODE_HEADER_HEIGHT + 26.0 + row * (PORT_ROW_HEIGHT + 4.0);
+    let zoom = graph.zoom;
+    let visual_left = node.position.x * zoom + graph.pan.x;
+    let visual_top = node.position.y * zoom + graph.pan.y;
+    let y = visual_top + (NODE_HEADER_HEIGHT + 26.0 + row * (PORT_ROW_HEIGHT + 4.0)) * zoom;
     let x = match address.direction {
-        PortDirection::Input => node.position.x + graph.pan.x + PORT_X_OFFSET,
-        PortDirection::Output => node.position.x + graph.pan.x + NODE_WIDTH - PORT_X_OFFSET,
+        PortDirection::Input => visual_left + PORT_X_OFFSET * zoom,
+        PortDirection::Output => visual_left + (NODE_WIDTH - PORT_X_OFFSET) * zoom,
     };
     Some(Vec2::new(x, y))
 }
