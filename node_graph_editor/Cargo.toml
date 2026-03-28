@@ -1,0 +1,9 @@
+[package]
+name = "bevy_node_graph"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+publish = false
+
+[dependencies]
+bevy = "0.18.1"

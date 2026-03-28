@@ -23,6 +23,36 @@ impl Position {
     pub fn chebyshev_distance(self, other: Self) -> i32 {
         (self.x - other.x).abs().max((self.y - other.y).abs())
     }
+
+    pub fn bresenham_line(self, other: Self) -> Vec<Self> {
+        let dx = (other.x - self.x).abs();
+        let dy = (other.y - self.y).abs();
+        let sx = if self.x < other.x { 1 } else { -1 };
+        let sy = if self.y < other.y { 1 } else { -1 };
+        let mut err = dx - dy;
+
+        let mut points = Vec::with_capacity((dx.max(dy) + 1) as usize);
+        let mut current = self;
+
+        loop {
+            points.push(current);
+            if current == other {
+                break;
+            }
+
+            let e2 = 2 * err;
+            if e2 > -dy {
+                err -= dy;
+                current.x += sx;
+            }
+            if e2 < dx {
+                err += dx;
+                current.y += sy;
+            }
+        }
+
+        points
+    }
 }
 
 #[derive(Component, Debug)]
@@ -123,11 +153,11 @@ impl PendingReply {
 }
 
 #[derive(Component, Debug, Clone, Copy, Default)]
-pub struct PendingMove {
+pub struct PendingAction {
     pub request_id: Option<u64>,
 }
 
-impl PendingMove {
+impl PendingAction {
     pub fn waiting(self) -> bool {
         self.request_id.is_some()
     }

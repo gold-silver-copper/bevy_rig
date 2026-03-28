@@ -7,6 +7,9 @@ use bevy::prelude::Resource;
 
 use crate::components::Position;
 
+const A_STAR_BASE_COST: i32 = 10;
+const MAX_A_STAR_NODES: usize = 640;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tile {
     Floor,
@@ -16,8 +19,8 @@ pub enum Tile {
 impl Tile {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Floor => "floorboards",
-            Self::Wall => "timber wall",
+            Self::Floor => "stone flagstones",
+            Self::Wall => "carved granite wall",
         }
     }
 
@@ -30,8 +33,12 @@ impl Tile {
 
     pub fn description(self) -> &'static str {
         match self {
-            Self::Floor => "Scuffed tavern floorboards stained by years of boots and spilled ale.",
-            Self::Wall => "A thick timber wall lined with plaster and old lantern soot.",
+            Self::Floor => {
+                "Broad stone flagstones worn smooth by boots, tankards, and generations of spilled brew."
+            }
+            Self::Wall => {
+                "A carved granite wall blackened by torch smoke and etched with old clan marks."
+            }
         }
     }
 }
@@ -54,17 +61,17 @@ pub enum PropKind {
 impl PropKind {
     pub fn label(self) -> &'static str {
         match self {
-            Self::BarCounter => "bar counter",
-            Self::Table => "table",
-            Self::Chair => "chair",
-            Self::Stool => "stool",
-            Self::Barrel => "barrel",
-            Self::Crate => "crate",
-            Self::Bottle => "bottle",
-            Self::Mug => "mug",
+            Self::BarCounter => "ale counter",
+            Self::Table => "drinking table",
+            Self::Chair => "stone chair",
+            Self::Stool => "keg stool",
+            Self::Barrel => "ale cask",
+            Self::Crate => "brew crate",
+            Self::Bottle => "jug",
+            Self::Mug => "tankard",
             Self::Candle => "candle",
-            Self::Shelf => "shelf",
-            Self::Piano => "piano",
+            Self::Shelf => "keg rack",
+            Self::Piano => "anvil organ",
         }
     }
 
@@ -86,17 +93,31 @@ impl PropKind {
 
     pub fn description(self) -> &'static str {
         match self {
-            Self::BarCounter => "A polished bar counter worn smooth by elbows and spilled ale.",
-            Self::Table => "A sturdy tavern table ready for cards, gossip, or another round.",
-            Self::Chair => "A creaking wooden chair.",
-            Self::Stool => "A low stool parked near the bar.",
-            Self::Barrel => "A cask that smells faintly of beer and oak.",
-            Self::Crate => "A supply crate full of kitchen odds and ends.",
-            Self::Bottle => "A bottle of house spirits.",
-            Self::Mug => "A mug waiting for a refill.",
-            Self::Candle => "A candle throwing warm amber light.",
-            Self::Shelf => "A shelf lined with spare cups and bottles.",
-            Self::Piano => "An old upright piano with a few sticky keys.",
+            Self::BarCounter => {
+                "A heavy stone-topped ale counter slick with foam, honey mead, and berry wine."
+            }
+            Self::Table => {
+                "A stout dwarven drinking table scarred by mugs, knives, and arm-wrestling contests."
+            }
+            Self::Chair => "A squat stone chair built for a broad dwarven back.",
+            Self::Stool => "A low keg stool shoved up against the ale counter.",
+            Self::Barrel => {
+                "A cask of whatever the brewers could coax from cave wheat, berries, roots, or honey."
+            }
+            Self::Crate => {
+                "A brew crate full of crocks, herbs, spare cups, and whatever fruit has not fermented yet."
+            }
+            Self::Bottle => {
+                "A stoppered jug of harsh mountain liquor, tart mushroom cider, or plum wine."
+            }
+            Self::Mug => "A thick tankard beaded with foam and smelling faintly of malt.",
+            Self::Candle => "A guttering tallow candle throwing warm amber light.",
+            Self::Shelf => {
+                "A rack crammed with spare tankards, crocks of mead, and stoneware jugs."
+            }
+            Self::Piano => {
+                "A wheezing anvil organ battered out for marching songs and drunken hall choruses."
+            }
         }
     }
 
@@ -312,8 +333,46 @@ impl TileMap {
         visible
     }
 
+    pub fn player_visible_tiles(
+        &self,
+        origin: Position,
+        cursor: Position,
+        min_radius: i32,
+        max_range: i32,
+    ) -> HashSet<Position> {
+        let delta = Position::new(cursor.x - origin.x, cursor.y - origin.y);
+        let (range, cos_threshold) = compute_player_fov_params(delta, min_radius, max_range);
+        let mut visible = self.visible_tiles(origin, range);
+
+        if delta != Position::new(0, 0) {
+            let cdx = delta.x as f64;
+            let cdy = delta.y as f64;
+            let cursor_len = (cdx * cdx + cdy * cdy).sqrt();
+
+            visible.retain(|&tile| {
+                let diff = Position::new(tile.x - origin.x, tile.y - origin.y);
+                if diff == Position::new(0, 0) {
+                    return true;
+                }
+                // Preserve the immediate "keyhole" around the player when aiming.
+                if diff.x.abs() <= 1 && diff.y.abs() <= 1 {
+                    return true;
+                }
+
+                let dx = diff.x as f64;
+                let dy = diff.y as f64;
+                let len = (dx * dx + dy * dy).sqrt();
+                let dot = (dx * cdx + dy * cdy) / (len * cursor_len);
+                dot >= cos_threshold
+            });
+        }
+
+        visible.retain(|&tile| has_clear_los(self, origin, tile));
+        visible
+    }
+
     pub fn has_line_of_sight(&self, origin: Position, target: Position, radius: i32) -> bool {
-        self.visible_tiles(origin, radius).contains(&target)
+        origin.chebyshev_distance(target) <= radius && has_clear_los(self, origin, target)
     }
 
     pub fn find_path(
@@ -334,6 +393,7 @@ impl TileMap {
             BinaryHeap::from([PathNode::new(start, 0, manhattan_distance(start, goal))]);
         let mut came_from = HashMap::new();
         let mut g_score = HashMap::from([((start.x, start.y), 0_i32)]);
+        let mut explored = 0usize;
         const DIRECTIONS: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
 
         while let Some(node) = frontier.pop() {
@@ -349,6 +409,11 @@ impl TileMap {
                 return reconstruct_path(start, goal, &came_from);
             }
 
+            explored += 1;
+            if explored >= MAX_A_STAR_NODES {
+                break;
+            }
+
             for (dx, dy) in DIRECTIONS {
                 let next = current.offset(dx, dy);
                 let key = (next.x, next.y);
@@ -359,7 +424,7 @@ impl TileMap {
                     continue;
                 }
 
-                let tentative_g = current_cost + 1;
+                let tentative_g = current_cost + A_STAR_BASE_COST;
                 let known_g = g_score.get(&key).copied().unwrap_or(i32::MAX);
                 if tentative_g < known_g {
                     came_from.insert(key, current);
@@ -374,6 +439,16 @@ impl TileMap {
         }
 
         None
+    }
+
+    pub fn first_path_step(
+        &self,
+        start: Position,
+        goal: Position,
+        blocked: &HashSet<(i32, i32)>,
+    ) -> Option<Position> {
+        self.find_path(start, goal, blocked)
+            .and_then(|path| path.first().copied())
     }
 }
 
@@ -417,6 +492,34 @@ impl PartialOrd for PathNode {
 
 fn manhattan_distance(a: Position, b: Position) -> i32 {
     (a.x - b.x).abs() + (a.y - b.y).abs()
+}
+
+fn compute_player_fov_params(delta: Position, min_radius: i32, max_range: i32) -> (i32, f64) {
+    if delta == Position::new(0, 0) {
+        return (min_radius.max(0), -1.0);
+    }
+
+    let dist = (((delta.x * delta.x + delta.y * delta.y) as f64).sqrt()).max(1.0);
+    let growth = ((max_range - min_radius).max(0) as f64) / 20.0;
+    let range = (min_radius as f64 + dist * growth).min(max_range as f64);
+    let cone_t = (dist / 20.0).min(1.0);
+    let cos_threshold = -1.0 + cone_t * 1.985;
+
+    (range.round() as i32, cos_threshold)
+}
+
+fn has_clear_los(map: &TileMap, origin: Position, target: Position) -> bool {
+    if target == origin {
+        return true;
+    }
+
+    for tile in origin.bresenham_line(target).into_iter().skip(1) {
+        if tile != target && map.blocks_sight(tile) {
+            return false;
+        }
+    }
+
+    true
 }
 
 fn reconstruct_path(
@@ -584,5 +687,34 @@ mod tests {
 
         assert_eq!(path.last().copied(), Some(Position::new(5, 3)));
         assert!(path.iter().all(|pos| map.is_walkable(*pos)));
+    }
+
+    #[test]
+    fn player_fov_hides_tiles_behind_cursor_direction() {
+        let map = TileMap::filled(9, 9, Tile::Floor);
+        let origin = Position::new(4, 4);
+        let cursor = Position::new(8, 4);
+        let behind = Position::new(1, 4);
+
+        let visible = map.player_visible_tiles(origin, cursor, 3, 8);
+
+        assert!(visible.contains(&origin));
+        assert!(!visible.contains(&behind));
+    }
+
+    #[test]
+    fn first_path_step_matches_walkable_route() {
+        let mut map = TileMap::filled(7, 7, Tile::Floor);
+        for y in 1..6 {
+            if y != 3 {
+                map.set(3, y, Tile::Wall);
+            }
+        }
+
+        let first = map
+            .first_path_step(Position::new(1, 3), Position::new(5, 3), &HashSet::new())
+            .expect("path should yield a first step");
+
+        assert_eq!(first, Position::new(2, 3));
     }
 }

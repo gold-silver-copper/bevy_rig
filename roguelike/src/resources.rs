@@ -4,7 +4,8 @@ use bevy::prelude::*;
 
 use crate::components::Position;
 
-pub const PLAYER_VIEW_RADIUS: i32 = 18;
+pub const PLAYER_VIEW_RADIUS: i32 = 24;
+pub const PLAYER_VIEW_MAX_RANGE: i32 = 44;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UiMode {
@@ -15,18 +16,18 @@ pub enum UiMode {
 #[derive(Resource, Debug)]
 pub struct UiState {
     pub mode: UiMode,
-    pub selected_npc: Option<Entity>,
     pub draft: String,
     pub cursor: Position,
+    pub show_debug: bool,
 }
 
 impl Default for UiState {
     fn default() -> Self {
         Self {
             mode: UiMode::Explore,
-            selected_npc: None,
             draft: String::new(),
             cursor: Position::new(0, 0),
+            show_debug: false,
         }
     }
 }

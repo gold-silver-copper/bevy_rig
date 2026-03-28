@@ -30,7 +30,7 @@ impl Plugin for RoguelikePlugin {
                     simulation::update_player_needs_system,
                     simulation::interact_with_cursor_system,
                     simulation::start_talk_system,
-                    simulation::request_npc_move_plans_system,
+                    simulation::request_npc_actions_system,
                     simulation::advance_npc_move_plans_system,
                     simulation::resolve_move_intents_system,
                     simulation::settle_npc_move_plans_system,

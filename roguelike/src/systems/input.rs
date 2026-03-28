@@ -7,7 +7,7 @@ use crate::{
     components::{Name, Npc, PendingReply, Player, Position},
     events::{InteractIntent, MoveIntent, TalkIntent},
     map::TileMap,
-    resources::{PLAYER_VIEW_RADIUS, UiMode, UiState},
+    resources::{PLAYER_VIEW_MAX_RANGE, PLAYER_VIEW_RADIUS, UiMode, UiState},
     runtime::RigRuntime,
 };
 
@@ -26,7 +26,12 @@ pub fn input_system(
     let Ok((player_entity, player_pos)) = player_query.single() else {
         return;
     };
-    let player_visible_tiles = map.visible_tiles(*player_pos, PLAYER_VIEW_RADIUS);
+    let player_visible_tiles = map.player_visible_tiles(
+        *player_pos,
+        ui.cursor,
+        PLAYER_VIEW_RADIUS,
+        PLAYER_VIEW_MAX_RANGE,
+    );
 
     for key in key_messages.read() {
         if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
@@ -63,8 +68,8 @@ fn handle_explore_input(
     player_entity: Entity,
     player_pos: Position,
     map: &TileMap,
-    visible_tiles: &HashSet<Position>,
-    npc_query: &Query<(Entity, &Position, &Name, &PendingReply), With<Npc>>,
+    _visible_tiles: &HashSet<Position>,
+    _npc_query: &Query<(Entity, &Position, &Name, &PendingReply), With<Npc>>,
     ui: &mut UiState,
     runtime: &mut RigRuntime,
     move_intents: &mut MessageWriter<MoveIntent>,
@@ -77,24 +82,27 @@ fn handle_explore_input(
             true
         }
         KeyCode::Char('i') => {
-            move_cursor(ui, npc_query, visible_tiles, map, 0, -1);
+            move_cursor(ui, map, 0, -1);
             false
         }
         KeyCode::Char('k') => {
-            move_cursor(ui, npc_query, visible_tiles, map, 0, 1);
+            move_cursor(ui, map, 0, 1);
             false
         }
         KeyCode::Char('j') => {
-            move_cursor(ui, npc_query, visible_tiles, map, -1, 0);
+            move_cursor(ui, map, -1, 0);
             false
         }
         KeyCode::Char('l') => {
-            move_cursor(ui, npc_query, visible_tiles, map, 1, 0);
+            move_cursor(ui, map, 1, 0);
             false
         }
         KeyCode::Char('c') => {
             ui.cursor = player_pos;
-            sync_selected_npc_to_cursor(visible_tiles, npc_query, ui);
+            false
+        }
+        KeyCode::F(2) | KeyCode::Char('`') => {
+            ui.show_debug = !ui.show_debug;
             false
         }
         KeyCode::Up | KeyCode::Char('w') => {
@@ -111,10 +119,6 @@ fn handle_explore_input(
         }
         KeyCode::Right | KeyCode::Char('d') => {
             emit_player_move(move_intents, player_entity, 1, 0);
-            false
-        }
-        KeyCode::Tab => {
-            cycle_selected_npc(player_pos, visible_tiles, npc_query, ui);
             false
         }
         KeyCode::Enter | KeyCode::Char('t') => {
@@ -191,74 +195,11 @@ fn handle_talk_input(
     }
 }
 
-fn cycle_selected_npc(
-    player_pos: Position,
-    visible_tiles: &HashSet<Position>,
-    npc_query: &Query<(Entity, &Position, &Name, &PendingReply), With<Npc>>,
-    ui: &mut UiState,
-) {
-    let mut npcs = npc_query
-        .iter()
-        .filter(|(_, pos, _, _)| visible_tiles.contains(pos))
-        .map(|(entity, pos, name, _)| {
-            (
-                entity,
-                player_pos.chebyshev_distance(*pos),
-                name.0.clone(),
-                *pos,
-            )
-        })
-        .collect::<Vec<_>>();
-
-    npcs.sort_by(|left, right| {
-        left.1
-            .cmp(&right.1)
-            .then_with(|| left.2.cmp(&right.2))
-            .then_with(|| left.3.x.cmp(&right.3.x))
-            .then_with(|| left.3.y.cmp(&right.3.y))
-    });
-
-    if npcs.is_empty() {
-        ui.selected_npc = None;
-        return;
-    }
-
-    let current = ui
-        .selected_npc
-        .and_then(|selected| npcs.iter().position(|(entity, ..)| *entity == selected));
-
-    let next_index = current.map(|index| (index + 1) % npcs.len()).unwrap_or(0);
-    ui.selected_npc = Some(npcs[next_index].0);
-}
-
-fn move_cursor(
-    ui: &mut UiState,
-    npc_query: &Query<(Entity, &Position, &Name, &PendingReply), With<Npc>>,
-    visible_tiles: &HashSet<Position>,
-    map: &TileMap,
-    dx: i32,
-    dy: i32,
-) {
+fn move_cursor(ui: &mut UiState, map: &TileMap, dx: i32, dy: i32) {
     let next = ui.cursor.offset(dx, dy);
     if !map.in_bounds(next.x, next.y) {
         return;
     }
 
     ui.cursor = next;
-    sync_selected_npc_to_cursor(visible_tiles, npc_query, ui);
-}
-
-fn sync_selected_npc_to_cursor(
-    visible_tiles: &HashSet<Position>,
-    npc_query: &Query<(Entity, &Position, &Name, &PendingReply), With<Npc>>,
-    ui: &mut UiState,
-) {
-    if !visible_tiles.contains(&ui.cursor) {
-        return;
-    }
-
-    ui.selected_npc = npc_query
-        .iter()
-        .find(|(_, pos, _, _)| **pos == ui.cursor)
-        .map(|(entity, _, _, _)| entity);
 }
