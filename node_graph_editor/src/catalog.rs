@@ -33,6 +33,7 @@ pub enum PortType {
     OutputSchema,
     Prompt,
     TextValue,
+    U64Value,
     TextResponse,
 }
 
@@ -41,7 +42,7 @@ pub enum ValueType {
     Text,
     ModelRef,
     Number,
-    Integer,
+    U64,
     Json,
     OpaqueText,
     ToolChoice,
@@ -94,12 +95,11 @@ pub enum NodeType {
     TextOutput,
     Model,
     Temperature,
-    MaxTokens,
+    U64,
     AdditionalParams,
     ToolServerHandle,
     DynamicContext,
     ToolChoice,
-    DefaultMaxTurns,
     Hook,
     OutputSchema,
 }
@@ -117,31 +117,31 @@ pub enum NodeValue {
         model_name: Option<String>,
     },
     Temperature(f64),
-    MaxTokens(u64),
+    U64(u64),
     AdditionalParams(String),
     ToolServerHandle(String),
     DynamicContext(String),
     ToolChoice(ToolChoiceSetting),
-    DefaultMaxTurns(usize),
     Hook(String),
     OutputSchema(String),
 }
 
 impl NodeValue {
-    pub fn editable_text(&self) -> Option<&str> {
+    pub fn inline_value_string(&self) -> Option<String> {
         match self {
             Self::Text(text)
             | Self::AdditionalParams(text)
             | Self::ToolServerHandle(text)
             | Self::DynamicContext(text)
             | Self::Hook(text)
-            | Self::OutputSchema(text) => Some(text.as_str()),
-            Self::TextOutput { text, .. } => Some(text.as_str()),
+            | Self::OutputSchema(text) => Some(text.clone()),
+            Self::Temperature(value) => Some(format!("{value:.2}")),
+            Self::U64(value) => Some(value.to_string()),
             _ => None,
         }
     }
 
-    pub fn set_text_value(&mut self, value: String) -> bool {
+    pub fn set_inline_value(&mut self, value: &str) -> bool {
         match self {
             Self::Text(text)
             | Self::AdditionalParams(text)
@@ -149,11 +149,25 @@ impl NodeValue {
             | Self::DynamicContext(text)
             | Self::Hook(text)
             | Self::OutputSchema(text) => {
-                *text = value;
+                *text = value.to_string();
                 true
             }
+            Self::Temperature(current) => match value.trim().parse::<f64>() {
+                Ok(parsed) => {
+                    *current = parsed.clamp(0.0, 2.0);
+                    true
+                }
+                Err(_) => false,
+            },
+            Self::U64(current) => match value.trim().parse::<u64>() {
+                Ok(parsed) => {
+                    *current = parsed;
+                    true
+                }
+                Err(_) => false,
+            },
             Self::TextOutput { text, .. } => {
-                *text = value;
+                *text = value.to_string();
                 true
             }
             _ => false,
@@ -164,41 +178,31 @@ impl NodeValue {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NodeTemplate {
     Agent,
-    PromptText,
+    String,
     TextOutput,
-    NameText,
-    DescriptionText,
     Model,
-    PreambleText,
-    StaticContextText,
     Temperature,
-    MaxTokens,
+    U64,
     AdditionalParams,
     ToolServerHandle,
     DynamicContext,
     ToolChoice,
-    DefaultMaxTurns,
     Hook,
     OutputSchema,
 }
 
 impl NodeTemplate {
-    pub const ALL: [NodeTemplate; 17] = [
+    pub const ALL: [NodeTemplate; 12] = [
         NodeTemplate::Agent,
-        NodeTemplate::PromptText,
+        NodeTemplate::String,
         NodeTemplate::TextOutput,
         NodeTemplate::Model,
-        NodeTemplate::NameText,
-        NodeTemplate::DescriptionText,
-        NodeTemplate::PreambleText,
-        NodeTemplate::StaticContextText,
         NodeTemplate::Temperature,
-        NodeTemplate::MaxTokens,
+        NodeTemplate::U64,
         NodeTemplate::AdditionalParams,
         NodeTemplate::ToolServerHandle,
         NodeTemplate::DynamicContext,
         NodeTemplate::ToolChoice,
-        NodeTemplate::DefaultMaxTurns,
         NodeTemplate::Hook,
         NodeTemplate::OutputSchema,
     ];
@@ -206,20 +210,15 @@ impl NodeTemplate {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Agent => "Agent",
-            Self::PromptText => "Prompt",
+            Self::String => "String",
             Self::TextOutput => "Text Output",
-            Self::NameText => "Name",
-            Self::DescriptionText => "Description",
             Self::Model => "Model",
-            Self::PreambleText => "Preamble",
-            Self::StaticContextText => "Static Context",
             Self::Temperature => "Temperature",
-            Self::MaxTokens => "Max Tokens",
+            Self::U64 => "U64",
             Self::AdditionalParams => "Additional Params",
             Self::ToolServerHandle => "Tool Server Handle",
             Self::DynamicContext => "Dynamic Context",
             Self::ToolChoice => "Tool Choice",
-            Self::DefaultMaxTurns => "Default Max Turns",
             Self::Hook => "Hook",
             Self::OutputSchema => "Output Schema",
         }
@@ -232,13 +231,10 @@ impl NodeTemplate {
                 title: "Agent".into(),
                 value: NodeValue::None,
             },
-            Self::PromptText => NodeSeed {
+            Self::String => NodeSeed {
                 node_type: NodeType::Text,
-                title: "Prompt".into(),
-                value: NodeValue::Text(
-                    "Write a warm dwarven greeting for the alehall and ask what brew the guest wants."
-                        .into(),
-                ),
+                title: "String".into(),
+                value: NodeValue::Text("text".into()),
             },
             Self::TextOutput => NodeSeed {
                 node_type: NodeType::TextOutput,
@@ -248,16 +244,6 @@ impl NodeTemplate {
                     status: "idle".into(),
                 },
             },
-            Self::NameText => NodeSeed {
-                node_type: NodeType::Text,
-                title: "Name".into(),
-                value: NodeValue::Text("Hall Greeter".into()),
-            },
-            Self::DescriptionText => NodeSeed {
-                node_type: NodeType::Text,
-                title: "Description".into(),
-                value: NodeValue::Text("Greets guests and recommends a fitting brew.".into()),
-            },
             Self::Model => NodeSeed {
                 node_type: NodeType::Model,
                 title: "Model".into(),
@@ -266,31 +252,15 @@ impl NodeTemplate {
                     model_name: None,
                 },
             },
-            Self::PreambleText => NodeSeed {
-                node_type: NodeType::Text,
-                title: "Preamble".into(),
-                value: NodeValue::Text(
-                    "You are a merry dwarf host in a loud mountain alehall. Reply briefly, concretely, and in character."
-                        .into(),
-                ),
-            },
-            Self::StaticContextText => NodeSeed {
-                node_type: NodeType::Text,
-                title: "Static Context".into(),
-                value: NodeValue::Text(
-                    "The alehall serves frothy ale, berry mead, root cider, cave-wheat stout, and whatever else the brewers can coax into a keg."
-                        .into(),
-                ),
-            },
             Self::Temperature => NodeSeed {
                 node_type: NodeType::Temperature,
                 title: "Temperature".into(),
                 value: NodeValue::Temperature(0.7),
             },
-            Self::MaxTokens => NodeSeed {
-                node_type: NodeType::MaxTokens,
-                title: "Max Tokens".into(),
-                value: NodeValue::MaxTokens(192),
+            Self::U64 => NodeSeed {
+                node_type: NodeType::U64,
+                title: "U64".into(),
+                value: NodeValue::U64(192),
             },
             Self::AdditionalParams => NodeSeed {
                 node_type: NodeType::AdditionalParams,
@@ -311,11 +281,6 @@ impl NodeTemplate {
                 node_type: NodeType::ToolChoice,
                 title: "Tool Choice".into(),
                 value: NodeValue::ToolChoice(ToolChoiceSetting::Auto),
-            },
-            Self::DefaultMaxTurns => NodeSeed {
-                node_type: NodeType::DefaultMaxTurns,
-                title: "Default Max Turns".into(),
-                value: NodeValue::DefaultMaxTurns(4),
             },
             Self::Hook => NodeSeed {
                 node_type: NodeType::Hook,
@@ -394,7 +359,7 @@ const AGENT_INPUTS: [PortSpec; 15] = [
     PortSpec {
         name: "max_tokens",
         ty: PortType::MaxTokens,
-        value_type: ValueType::Integer,
+        value_type: ValueType::U64,
         required: false,
         accepts_multiple: false,
     },
@@ -429,7 +394,7 @@ const AGENT_INPUTS: [PortSpec; 15] = [
     PortSpec {
         name: "default_max_turns",
         ty: PortType::DefaultMaxTurns,
-        value_type: ValueType::Integer,
+        value_type: ValueType::U64,
         required: false,
         accepts_multiple: false,
     },
@@ -489,10 +454,10 @@ const TEMP_OUTPUTS: [PortSpec; 1] = [PortSpec {
     accepts_multiple: false,
 }];
 
-const MAX_TOKENS_OUTPUTS: [PortSpec; 1] = [PortSpec {
-    name: "max_tokens",
-    ty: PortType::MaxTokens,
-    value_type: ValueType::Integer,
+const U64_OUTPUTS: [PortSpec; 1] = [PortSpec {
+    name: "u64",
+    ty: PortType::U64Value,
+    value_type: ValueType::U64,
     required: false,
     accepts_multiple: false,
 }];
@@ -529,14 +494,6 @@ const TOOL_CHOICE_OUTPUTS: [PortSpec; 1] = [PortSpec {
     accepts_multiple: false,
 }];
 
-const DEFAULT_MAX_TURNS_OUTPUTS: [PortSpec; 1] = [PortSpec {
-    name: "default_max_turns",
-    ty: PortType::DefaultMaxTurns,
-    value_type: ValueType::Integer,
-    required: false,
-    accepts_multiple: false,
-}];
-
 const HOOK_OUTPUTS: [PortSpec; 1] = [PortSpec {
     name: "hook",
     ty: PortType::Hook,
@@ -567,12 +524,11 @@ pub fn node_outputs(node_type: NodeType) -> &'static [PortSpec] {
         NodeType::Text => &TEXT_OUTPUTS,
         NodeType::Model => &MODEL_OUTPUTS,
         NodeType::Temperature => &TEMP_OUTPUTS,
-        NodeType::MaxTokens => &MAX_TOKENS_OUTPUTS,
+        NodeType::U64 => &U64_OUTPUTS,
         NodeType::AdditionalParams => &ADDITIONAL_PARAMS_OUTPUTS,
         NodeType::ToolServerHandle => &TOOL_SERVER_OUTPUTS,
         NodeType::DynamicContext => &DYNAMIC_CONTEXT_OUTPUTS,
         NodeType::ToolChoice => &TOOL_CHOICE_OUTPUTS,
-        NodeType::DefaultMaxTurns => &DEFAULT_MAX_TURNS_OUTPUTS,
         NodeType::Hook => &HOOK_OUTPUTS,
         NodeType::OutputSchema => &OUTPUT_SCHEMA_OUTPUTS,
         NodeType::TextOutput => &[],

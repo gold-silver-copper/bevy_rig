@@ -6,27 +6,7 @@ use crate::{
     catalog::{NodeId, NodeType, NodeValue, PortType, ToolChoiceSetting},
     document::GraphDocument,
     runtime::{CompiledAgentRun, RigEditorRuntime},
-    session::EditorSession,
 };
-
-pub fn compile_selected_agent_run(
-    document: &GraphDocument,
-    session: &EditorSession,
-    runtime: &RigEditorRuntime,
-) -> Result<CompiledAgentRun> {
-    let agent_id = session
-        .selected_node
-        .filter(|node_id| {
-            matches!(
-                document.node(*node_id).map(|node| node.node_type),
-                Some(NodeType::Agent)
-            )
-        })
-        .or_else(|| document.first_node_id_by_type(NodeType::Agent))
-        .ok_or_else(|| anyhow!("select an Agent node before running the graph"))?;
-
-    compile_agent_run(document, runtime, agent_id)
-}
 
 pub fn compile_agent_run(
     document: &GraphDocument,
@@ -200,8 +180,8 @@ fn optional_max_tokens_source(document: &GraphDocument, agent_id: NodeId) -> Res
     };
 
     match document.node(source).map(|node| &node.value) {
-        Some(NodeValue::MaxTokens(value)) => Ok(Some(*value)),
-        _ => Err(anyhow!("max_tokens input must come from a Max Tokens node")),
+        Some(NodeValue::U64(value)) => Ok(Some(*value)),
+        _ => Err(anyhow!("max_tokens input must come from a U64 node")),
     }
 }
 
@@ -263,10 +243,8 @@ fn optional_default_max_turns_source(
     };
 
     match document.node(source).map(|node| &node.value) {
-        Some(NodeValue::DefaultMaxTurns(value)) => Ok(Some(*value)),
-        _ => Err(anyhow!(
-            "default_max_turns input must come from a Default Max Turns node"
-        )),
+        Some(NodeValue::U64(value)) => Ok(Some(*value as usize)),
+        _ => Err(anyhow!("default_max_turns input must come from a U64 node")),
     }
 }
 
