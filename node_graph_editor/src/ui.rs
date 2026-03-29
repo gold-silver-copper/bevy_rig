@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use bevy::{
-    ecs::hierarchy::ChildSpawnerCommands,
+    ecs::{hierarchy::ChildSpawnerCommands, system::ParamSet},
     input::{
         ButtonState,
         keyboard::{KeyCode, KeyboardInput},
@@ -2191,10 +2191,12 @@ fn update_node_view_state(
 fn update_chrome_text(
     document: Res<GraphDocument>,
     editing: Res<TextEditingState>,
-    mut titles: Query<(&NodeTitleText, &mut Text)>,
-    mut values: Query<(&NodeValueText, &mut Text)>,
+    mut texts: ParamSet<(
+        Query<(&NodeTitleText, &mut Text)>,
+        Query<(&NodeValueText, &mut Text)>,
+    )>,
 ) {
-    for (label, mut text) in &mut titles {
+    for (label, mut text) in &mut texts.p0() {
         let Some(node) = document.node(label.id) else {
             continue;
         };
@@ -2210,7 +2212,7 @@ fn update_chrome_text(
         }
     }
 
-    for (label, mut text) in &mut values {
+    for (label, mut text) in &mut texts.p1() {
         let Some(node) = document.node(label.id) else {
             continue;
         };
