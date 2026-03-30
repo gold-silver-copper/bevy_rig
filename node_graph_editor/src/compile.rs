@@ -358,6 +358,31 @@ mod tests {
     }
 
     #[test]
+    fn compile_rejects_provider_after_kind_change_requires_configuration() {
+        let mut registry = test_registry();
+        let provider_id = registry.first_provider_id().expect("default provider");
+        let provider = registry
+            .provider_mut(&provider_id)
+            .expect("default provider should exist");
+        provider.set_kind(ProviderKind::OpenAi);
+        registry.touch();
+
+        let mut graph = GraphDocument::demo();
+        graph.apply_provider_registry(&registry);
+        let model_node = graph
+            .first_node_id_by_type(NodeType::Model)
+            .expect("demo graph should have a model node");
+        graph.set_node_inline_value_live(model_node, "gpt-4o-mini");
+        let agent_id = graph
+            .first_node_id_by_type(NodeType::Agent)
+            .expect("demo graph should have an agent");
+
+        let error =
+            compile_agent_run(&graph, &registry, agent_id).expect_err("compile should fail");
+        assert!(error.to_string().contains("is not configured"));
+    }
+
+    #[test]
     fn compile_captures_provider_variant() {
         let mut registry = test_registry();
         let openai_id = registry.add_provider(ProviderKind::OpenAi);

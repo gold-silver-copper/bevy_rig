@@ -601,6 +601,7 @@ impl GraphDocument {
                 model_name,
             } = &mut node.value
             {
+                let previous_size = node.size;
                 let resolved_provider_id = provider_id
                     .as_deref()
                     .filter(|id| providers.provider(id).is_some())
@@ -626,6 +627,11 @@ impl GraphDocument {
                     || !provider.cached_models.iter().any(|item| item == model_name);
                 if needs_default {
                     *model_name = provider.cached_models[0].clone();
+                    changed = true;
+                }
+
+                grow_node_to_fit_contents(node);
+                if node.size != previous_size {
                     changed = true;
                 }
             }
@@ -757,7 +763,7 @@ fn default_node_body_dimensions(node_type: NodeType) -> (f32, f32) {
         NodeType::Text => (360.0, 92.0),
         NodeType::AdditionalParams | NodeType::OutputSchema => (340.0, 118.0),
         NodeType::TextOutput => (340.0, 120.0),
-        NodeType::Model => (360.0, 72.0),
+        NodeType::Model => (420.0, 320.0),
         NodeType::Temperature | NodeType::U64 | NodeType::ToolChoice => (300.0, 62.0),
         NodeType::ToolServerHandle | NodeType::DynamicContext | NodeType::Hook => (320.0, 92.0),
     }
@@ -778,7 +784,7 @@ fn node_chrome_height(node_type: NodeType) -> f32 {
 mod tests {
     use super::*;
     use crate::providers::{
-        EndpointProviderConfig, ProviderConfig, ProviderRegistry, ProviderStatus,
+        EndpointProviderConfig, ProviderConfig, ProviderKind, ProviderRegistry, ProviderStatus,
     };
 
     fn test_registry() -> ProviderRegistry {
@@ -867,6 +873,79 @@ mod tests {
                     provider_id.as_deref(),
                     registry.first_provider_id().as_deref()
                 );
+            }
+            other => panic!("expected model node, found {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apply_provider_registry_preserves_distinct_valid_provider_bindings() {
+        let mut registry = test_registry();
+        let default_id = registry.first_provider_id().expect("default provider");
+        let second_id = registry.add_provider(ProviderKind::Ollama);
+        let second = registry
+            .provider_mut(&second_id)
+            .expect("second provider should exist");
+        second.status = ProviderStatus::ready("ready");
+        second.cached_models = vec!["qwen2.5:14b".into()];
+        registry.touch();
+
+        let mut graph = GraphDocument::demo();
+        let first_model = graph
+            .first_node_id_by_type(NodeType::Model)
+            .expect("demo graph should have a model node");
+        let second_model = graph.add_node(NodeTemplate::Model.instantiate(), Vec2::ZERO);
+        assert!(graph.set_model_provider(first_model, Some(default_id.clone())));
+        assert!(graph.set_model_provider(second_model, Some(second_id.clone())));
+
+        graph.apply_provider_registry(&registry);
+
+        match &graph.node(first_model).expect("first model node").value {
+            NodeValue::Model { provider_id, .. } => {
+                assert_eq!(provider_id.as_deref(), Some(default_id.as_str()));
+            }
+            other => panic!("expected model node, found {other:?}"),
+        }
+        match &graph.node(second_model).expect("second model node").value {
+            NodeValue::Model { provider_id, .. } => {
+                assert_eq!(provider_id.as_deref(), Some(second_id.as_str()));
+            }
+            other => panic!("expected model node, found {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apply_provider_registry_rebinds_deleted_provider_to_remaining_registration() {
+        let mut registry = test_registry();
+        let default_id = registry.first_provider_id().expect("default provider");
+        let second_id = registry.add_provider(ProviderKind::Ollama);
+        let second = registry
+            .provider_mut(&second_id)
+            .expect("second provider should exist");
+        second.status = ProviderStatus::ready("ready");
+        second.cached_models = vec!["qwen2.5:14b".into()];
+        registry.touch();
+
+        let mut graph = GraphDocument::demo();
+        let first_model = graph
+            .first_node_id_by_type(NodeType::Model)
+            .expect("demo graph should have a model node");
+        let second_model = graph.add_node(NodeTemplate::Model.instantiate(), Vec2::ZERO);
+        assert!(graph.set_model_provider(first_model, Some(default_id.clone())));
+        assert!(graph.set_model_provider(second_model, Some(second_id.clone())));
+
+        assert!(registry.remove_provider(&default_id));
+        graph.apply_provider_registry(&registry);
+
+        match &graph.node(first_model).expect("first model node").value {
+            NodeValue::Model { provider_id, .. } => {
+                assert_eq!(provider_id.as_deref(), Some(second_id.as_str()));
+            }
+            other => panic!("expected model node, found {other:?}"),
+        }
+        match &graph.node(second_model).expect("second model node").value {
+            NodeValue::Model { provider_id, .. } => {
+                assert_eq!(provider_id.as_deref(), Some(second_id.as_str()));
             }
             other => panic!("expected model node, found {other:?}"),
         }

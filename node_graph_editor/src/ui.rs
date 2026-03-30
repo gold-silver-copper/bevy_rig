@@ -62,7 +62,7 @@ impl Plugin for NodeGraphEditorPlugin {
             .init_resource::<TextEditingState>()
             .init_resource::<NodePaletteState>()
             .init_resource::<NodeContextMenuState>()
-            .init_resource::<ProviderPanelState>()
+            .init_resource::<ProviderEditingState>()
             .init_resource::<HoverHintState>()
             .add_systems(Startup, (setup_editor_ui, initialize_editor_session))
             .add_systems(
@@ -71,8 +71,7 @@ impl Plugin for NodeGraphEditorPlugin {
                     handle_palette_shortcuts,
                     handle_palette_buttons,
                     handle_context_menu_buttons,
-                    handle_provider_panel_buttons,
-                    handle_provider_text_edit_input,
+                    handle_provider_edit_input,
                     handle_node_buttons,
                     handle_text_edit_input,
                     handle_canvas_zoom,
@@ -80,7 +79,6 @@ impl Plugin for NodeGraphEditorPlugin {
                     sync_node_views,
                     sync_palette_view,
                     sync_context_menu_view,
-                    sync_provider_panel_view,
                     sync_hover_hint_view,
                     update_port_view_state,
                     update_node_view_state,
@@ -109,18 +107,15 @@ struct GraphUiRegistry {
     palette_view: Option<Entity>,
     context_menu_parent: Option<Entity>,
     context_menu_view: Option<Entity>,
-    provider_panel_parent: Option<Entity>,
-    provider_panel_view: Option<Entity>,
     hover_hint_parent: Option<Entity>,
     hover_hint_view: Option<Entity>,
     node_views: HashMap<NodeId, Entity>,
     overlay_entities: Vec<Entity>,
     last_graph_revision: u64,
     last_node_provider_revision: u64,
+    last_provider_edit_revision: u64,
     last_palette_revision: u64,
     last_context_menu_revision: u64,
-    last_provider_panel_revision: u64,
-    last_provider_registry_revision: u64,
     last_hover_hint_revision: u64,
     last_zoom: f32,
 }
@@ -223,6 +218,7 @@ impl NodeContextMenuState {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ProviderEditTarget {
+    node_id: NodeId,
     provider_id: ProviderId,
     field: ProviderTextField,
 }
@@ -239,38 +235,31 @@ enum ProviderTextField {
 }
 
 #[derive(Resource, Default)]
-struct ProviderPanelState {
-    visible: bool,
-    selected_provider: Option<ProviderId>,
+struct ProviderEditingState {
     editing: Option<ProviderEditTarget>,
     buffer: String,
     revision: u64,
 }
 
-impl ProviderPanelState {
-    fn open(&mut self) {
-        if !self.visible {
-            self.visible = true;
-            self.revision = self.revision.wrapping_add(1);
-        }
-    }
-
-    fn close(&mut self) {
-        if self.visible || self.editing.is_some() || !self.buffer.is_empty() {
-            self.visible = false;
-            self.clear_edit();
-            self.revision = self.revision.wrapping_add(1);
-        }
-    }
-
+impl ProviderEditingState {
     fn clear_edit(&mut self) {
         self.editing = None;
         self.buffer.clear();
         self.revision = self.revision.wrapping_add(1);
     }
 
-    fn begin_edit(&mut self, provider_id: ProviderId, field: ProviderTextField, value: String) {
-        let target = ProviderEditTarget { provider_id, field };
+    fn begin_edit(
+        &mut self,
+        node_id: NodeId,
+        provider_id: ProviderId,
+        field: ProviderTextField,
+        value: String,
+    ) {
+        let target = ProviderEditTarget {
+            node_id,
+            provider_id,
+            field,
+        };
         if self.editing.as_ref() == Some(&target) && self.buffer == value {
             return;
         }
@@ -281,19 +270,6 @@ impl ProviderPanelState {
 
     fn mark_changed(&mut self) {
         self.revision = self.revision.wrapping_add(1);
-    }
-
-    fn sync_selection(&mut self, providers: &ProviderRegistry) {
-        let desired = self
-            .selected_provider
-            .as_deref()
-            .filter(|id| providers.provider(id).is_some())
-            .map(str::to_string)
-            .or_else(|| providers.first_provider_id());
-        if self.selected_provider != desired {
-            self.selected_provider = desired;
-            self.revision = self.revision.wrapping_add(1);
-        }
     }
 }
 
@@ -351,9 +327,20 @@ enum NodeAction {
     NextSetting(NodeId),
     PreviousProvider(NodeId),
     NextProvider(NodeId),
+    AddProvider(NodeId),
+    DeleteProvider(NodeId),
     PreviousModel(NodeId),
     NextModel(NodeId),
     RefreshProvider(NodeId),
+    PreviousProviderKind(NodeId),
+    NextProviderKind(NodeId),
+    PreviousProviderVariant(NodeId),
+    NextProviderVariant(NodeId),
+    PreviousAzureAuth(NodeId),
+    NextAzureAuth(NodeId),
+    PreviousHuggingFaceSubprovider(NodeId),
+    NextHuggingFaceSubprovider(NodeId),
+    EditProviderField(NodeId, ProviderTextField),
     RunAgent(NodeId),
     StopRun(NodeId),
     ClearOutput(NodeId),
@@ -377,28 +364,6 @@ enum ContextMenuAction {
 
 #[derive(Component)]
 struct ContextMenuButton(ContextMenuAction);
-
-#[derive(Component, Clone)]
-enum ProviderPanelAction {
-    TogglePanel,
-    PreviousProvider,
-    NextProvider,
-    AddProvider,
-    DeleteProvider,
-    RefreshProvider,
-    PreviousKind,
-    NextKind,
-    PreviousVariant,
-    NextVariant,
-    PreviousAzureAuth,
-    NextAzureAuth,
-    PreviousHuggingFaceSubprovider,
-    NextHuggingFaceSubprovider,
-    EditField(ProviderTextField),
-}
-
-#[derive(Component)]
-struct ProviderPanelButton(ProviderPanelAction);
 
 #[derive(Component, Clone, Copy)]
 struct PortView {
@@ -614,7 +579,6 @@ fn setup_editor_ui(
 ) {
     let font = asset_server.load("fonts/JetBrainsMono-Regular.ttf");
     commands.insert_resource(EditorFont(font.clone()));
-    let editor_font = EditorFont(font);
     commands.spawn(Camera2d);
 
     let root = commands
@@ -690,37 +654,6 @@ fn setup_editor_ui(
         .id();
     commands.entity(root).add_child(canvas);
 
-    commands.entity(root).with_children(|parent| {
-        parent
-            .spawn((
-                Node {
-                    position_type: PositionType::Absolute,
-                    top: Val::Px(18.0),
-                    right: Val::Px(18.0),
-                    flex_direction: FlexDirection::Row,
-                    column_gap: Val::Px(8.0),
-                    padding: UiRect::all(Val::Px(10.0)),
-                    border: UiRect::all(Val::Px(1.0)),
-                    border_radius: BorderRadius::all(Val::Px(12.0)),
-                    ..default()
-                },
-                BackgroundColor(Color::srgb_u8(24, 25, 29)),
-                BorderColor::all(Color::srgb_u8(66, 69, 76)),
-                GlobalZIndex(60),
-            ))
-            .observe(|mut click: On<Pointer<Click>>| {
-                click.propagate(false);
-            })
-            .with_children(|toolbar| {
-                spawn_provider_panel_button(
-                    toolbar,
-                    "Providers",
-                    ProviderPanelAction::TogglePanel,
-                    &editor_font,
-                );
-            });
-    });
-
     let overlay_layer = commands
         .spawn((
             Node {
@@ -752,7 +685,6 @@ fn setup_editor_ui(
     registry.node_layer = Some(node_layer);
     registry.palette_parent = Some(canvas);
     registry.context_menu_parent = Some(canvas);
-    registry.provider_panel_parent = Some(root);
     registry.hover_hint_parent = Some(canvas);
 }
 
@@ -906,60 +838,27 @@ fn spawn_context_menu_button(
         ));
 }
 
-fn spawn_provider_panel_button(
-    parent: &mut ChildSpawnerCommands,
-    label: &str,
-    action: ProviderPanelAction,
-    fonts: &EditorFont,
-) {
-    parent
-        .spawn((
-            Button,
-            Node {
-                min_width: Val::Px(72.0),
-                min_height: Val::Px(30.0),
-                align_items: AlignItems::Center,
-                justify_content: JustifyContent::Center,
-                padding: UiRect::axes(Val::Px(10.0), Val::Px(6.0)),
-                border: UiRect::all(Val::Px(1.0)),
-                border_radius: BorderRadius::all(Val::Px(8.0)),
-                ..default()
-            },
-            ProviderPanelButton(action.clone()),
-            ButtonHintText(provider_panel_hint(&action)),
-            BackgroundColor(button_background(Interaction::None)),
-            BorderColor::all(Color::srgb_u8(62, 64, 70)),
-        ))
-        .observe(|mut click: On<Pointer<Click>>| {
-            click.propagate(false);
-        })
-        .with_child((
-            Text::new(label),
-            editor_text_font(fonts, 13.0),
-            TextColor(Color::srgb_u8(232, 234, 238)),
-            Pickable::IGNORE,
-        ));
-}
-
 fn spawn_provider_field_button(
     parent: &mut ChildSpawnerCommands,
+    node_id: NodeId,
     label: &str,
     value: &str,
     field: ProviderTextField,
     active: bool,
     fonts: &EditorFont,
+    zoom: f32,
 ) {
     parent
         .spawn(Node {
             width: Val::Percent(100.0),
             flex_direction: FlexDirection::Column,
-            row_gap: Val::Px(4.0),
+            row_gap: Val::Px(scaled(4.0, zoom)),
             ..default()
         })
         .with_children(|column| {
             column.spawn((
                 Text::new(label),
-                editor_text_font(fonts, 12.0),
+                editor_text_font(fonts, scaled_font(12.0, zoom)),
                 TextColor(Color::srgb_u8(164, 170, 180)),
                 Pickable::IGNORE,
             ));
@@ -968,15 +867,20 @@ fn spawn_provider_field_button(
                     Button,
                     Node {
                         width: Val::Percent(100.0),
-                        min_height: Val::Px(34.0),
+                        min_height: Val::Px(scaled(34.0, zoom)),
                         align_items: AlignItems::Center,
-                        padding: UiRect::axes(Val::Px(10.0), Val::Px(8.0)),
+                        padding: UiRect::axes(
+                            Val::Px(scaled(10.0, zoom)),
+                            Val::Px(scaled(8.0, zoom)),
+                        ),
                         border: UiRect::all(Val::Px(1.0)),
-                        border_radius: BorderRadius::all(Val::Px(8.0)),
+                        border_radius: BorderRadius::all(Val::Px(scaled(8.0, zoom))),
                         ..default()
                     },
-                    ProviderPanelButton(ProviderPanelAction::EditField(field)),
-                    ButtonHintText(provider_panel_hint(&ProviderPanelAction::EditField(field))),
+                    NodeActionButton(NodeAction::EditProviderField(node_id, field)),
+                    ButtonHintText(node_action_hint(NodeAction::EditProviderField(
+                        node_id, field,
+                    ))),
                     BackgroundColor(if active {
                         Color::srgb_u8(38, 40, 46)
                     } else {
@@ -993,7 +897,7 @@ fn spawn_provider_field_button(
                 })
                 .with_child((
                     Text::new(value),
-                    editor_text_font(fonts, 13.0),
+                    editor_text_font(fonts, scaled_font(13.0, zoom)),
                     TextColor(Color::srgb_u8(236, 238, 241)),
                     Pickable::IGNORE,
                 ));
@@ -1006,11 +910,25 @@ fn node_action_hint(action: NodeAction) -> &'static str {
         NodeAction::NextSetting(_) => "Increase or go to next value",
         NodeAction::PreviousProvider(_) => "Select the previous registered provider",
         NodeAction::NextProvider(_) => "Select the next registered provider",
+        NodeAction::AddProvider(_) => "Create a new shared provider registration",
+        NodeAction::DeleteProvider(_) => "Delete the selected shared provider registration",
         NodeAction::PreviousModel(_) => "Select the previous discovered model",
         NodeAction::NextModel(_) => "Select the next discovered model",
         NodeAction::RefreshProvider(_) => {
             "Refresh the selected provider readiness and cached models"
         }
+        NodeAction::PreviousProviderKind(_) | NodeAction::NextProviderKind(_) => {
+            "Change the selected provider kind"
+        }
+        NodeAction::PreviousProviderVariant(_) | NodeAction::NextProviderVariant(_) => {
+            "Change the selected provider API variant"
+        }
+        NodeAction::PreviousAzureAuth(_) | NodeAction::NextAzureAuth(_) => {
+            "Change Azure authentication mode"
+        }
+        NodeAction::PreviousHuggingFaceSubprovider(_)
+        | NodeAction::NextHuggingFaceSubprovider(_) => "Change the Hugging Face router subprovider",
+        NodeAction::EditProviderField(_, _) => "Edit this shared provider field",
         NodeAction::RunAgent(_) => "Run this agent graph",
         NodeAction::StopRun(_) => "Stop the current run",
         NodeAction::ClearOutput(_) => "Clear this output node",
@@ -1025,39 +943,13 @@ fn context_menu_hint(action: ContextMenuAction) -> &'static str {
     }
 }
 
-fn provider_panel_hint(action: &ProviderPanelAction) -> &'static str {
-    match action {
-        ProviderPanelAction::TogglePanel => "Open or close the provider registry panel",
-        ProviderPanelAction::PreviousProvider => "Select the previous provider registration",
-        ProviderPanelAction::NextProvider => "Select the next provider registration",
-        ProviderPanelAction::AddProvider => "Create a new provider registration",
-        ProviderPanelAction::DeleteProvider => "Delete the selected provider registration",
-        ProviderPanelAction::RefreshProvider => {
-            "Refresh readiness and cached model suggestions for the selected provider"
-        }
-        ProviderPanelAction::PreviousKind | ProviderPanelAction::NextKind => {
-            "Change the selected provider kind"
-        }
-        ProviderPanelAction::PreviousVariant | ProviderPanelAction::NextVariant => {
-            "Change the selected provider API variant"
-        }
-        ProviderPanelAction::PreviousAzureAuth | ProviderPanelAction::NextAzureAuth => {
-            "Change Azure authentication mode"
-        }
-        ProviderPanelAction::PreviousHuggingFaceSubprovider
-        | ProviderPanelAction::NextHuggingFaceSubprovider => {
-            "Change the Hugging Face router subprovider"
-        }
-        ProviderPanelAction::EditField(_) => "Edit this provider field",
-    }
-}
-
 fn handle_node_buttons(
     mut document: ResMut<GraphDocument>,
     mut providers: ResMut<ProviderRegistry>,
     mut session: ResMut<EditorSession>,
     mut runtime: ResMut<RigEditorRuntime>,
     mut editing: ResMut<TextEditingState>,
+    mut provider_editing: ResMut<ProviderEditingState>,
     mut interactions: Query<
         (&Interaction, &NodeActionButton, &mut BackgroundColor),
         Changed<Interaction>,
@@ -1074,37 +966,37 @@ fn handle_node_buttons(
                 session.select_node(Some(node_id));
                 if !document.cycle_setting(node_id, -1, &[]) {
                     runtime.last_status = "This node has no previous setting to cycle.".into();
-                } else if editing.target == Some((node_id, EditField::Value))
-                    && let Some(value) = document
-                        .node(node_id)
-                        .and_then(GraphNode::editable_value_text)
-                {
-                    editing.buffer = value;
-                    editing.mark_changed();
+                } else {
+                    sync_inline_value_editor(&document, &mut editing, node_id);
                 }
             }
             NodeAction::NextSetting(node_id) => {
                 session.select_node(Some(node_id));
                 if !document.cycle_setting(node_id, 1, &[]) {
                     runtime.last_status = "This node has no next setting to cycle.".into();
-                } else if editing.target == Some((node_id, EditField::Value))
-                    && let Some(value) = document
-                        .node(node_id)
-                        .and_then(GraphNode::editable_value_text)
-                {
-                    editing.buffer = value;
-                    editing.mark_changed();
+                } else {
+                    sync_inline_value_editor(&document, &mut editing, node_id);
                 }
             }
             NodeAction::PreviousProvider(node_id) => {
                 session.select_node(Some(node_id));
-                let current_provider = match document.node(node_id).map(|node| &node.value) {
-                    Some(NodeValue::Model { provider_id, .. }) => provider_id.as_deref(),
-                    _ => None,
-                };
-                let next_provider = providers.cycle_provider_id(current_provider, -1);
+                commit_provider_edit(
+                    &mut provider_editing,
+                    &mut document,
+                    &mut providers,
+                    &mut runtime,
+                    &mut editing,
+                    session.selected_node,
+                );
+                let current_provider = model_provider_id(&document, node_id);
+                let next_provider = providers.cycle_provider_id(current_provider.as_deref(), -1);
                 if document.set_model_provider(node_id, next_provider.clone()) {
                     document.apply_provider_registry(&providers);
+                    sync_selected_inline_value_editor(
+                        &document,
+                        &mut editing,
+                        session.selected_node,
+                    );
                     runtime.last_status = next_provider
                         .as_deref()
                         .and_then(|id| providers.provider(id))
@@ -1115,25 +1007,26 @@ fn handle_node_buttons(
                 } else {
                     runtime.last_status = "No previous provider is available.".into();
                 }
-
-                if editing.target == Some((node_id, EditField::Value))
-                    && let Some(value) = document
-                        .node(node_id)
-                        .and_then(GraphNode::editable_value_text)
-                {
-                    editing.buffer = value;
-                    editing.mark_changed();
-                }
             }
             NodeAction::NextProvider(node_id) => {
                 session.select_node(Some(node_id));
-                let current_provider = match document.node(node_id).map(|node| &node.value) {
-                    Some(NodeValue::Model { provider_id, .. }) => provider_id.as_deref(),
-                    _ => None,
-                };
-                let next_provider = providers.cycle_provider_id(current_provider, 1);
+                commit_provider_edit(
+                    &mut provider_editing,
+                    &mut document,
+                    &mut providers,
+                    &mut runtime,
+                    &mut editing,
+                    session.selected_node,
+                );
+                let current_provider = model_provider_id(&document, node_id);
+                let next_provider = providers.cycle_provider_id(current_provider.as_deref(), 1);
                 if document.set_model_provider(node_id, next_provider.clone()) {
                     document.apply_provider_registry(&providers);
+                    sync_selected_inline_value_editor(
+                        &document,
+                        &mut editing,
+                        session.selected_node,
+                    );
                     runtime.last_status = next_provider
                         .as_deref()
                         .and_then(|id| providers.provider(id))
@@ -1144,24 +1037,70 @@ fn handle_node_buttons(
                 } else {
                     runtime.last_status = "No next provider is available.".into();
                 }
-
-                if editing.target == Some((node_id, EditField::Value))
-                    && let Some(value) = document
-                        .node(node_id)
-                        .and_then(GraphNode::editable_value_text)
-                {
-                    editing.buffer = value;
-                    editing.mark_changed();
+            }
+            NodeAction::AddProvider(node_id) => {
+                session.select_node(Some(node_id));
+                commit_provider_edit(
+                    &mut provider_editing,
+                    &mut document,
+                    &mut providers,
+                    &mut runtime,
+                    &mut editing,
+                    session.selected_node,
+                );
+                let kind = model_provider_id(&document, node_id)
+                    .as_deref()
+                    .and_then(|id| providers.provider(id))
+                    .map(|provider| provider.kind)
+                    .unwrap_or(ProviderKind::Ollama);
+                let provider_id = providers.add_provider(kind);
+                persist_provider_registry(&providers, &mut runtime);
+                document.set_model_provider(node_id, Some(provider_id.clone()));
+                document.apply_provider_registry(&providers);
+                sync_selected_inline_value_editor(&document, &mut editing, session.selected_node);
+                queue_provider_refresh(&mut providers, &mut runtime, &provider_id);
+            }
+            NodeAction::DeleteProvider(node_id) => {
+                session.select_node(Some(node_id));
+                commit_provider_edit(
+                    &mut provider_editing,
+                    &mut document,
+                    &mut providers,
+                    &mut runtime,
+                    &mut editing,
+                    session.selected_node,
+                );
+                if let Some(provider_id) = model_provider_id(&document, node_id) {
+                    clear_provider_edit_if_matches(&mut provider_editing, &provider_id);
+                    if providers.remove_provider(&provider_id) {
+                        persist_provider_registry(&providers, &mut runtime);
+                        document.apply_provider_registry(&providers);
+                        sync_selected_inline_value_editor(
+                            &document,
+                            &mut editing,
+                            session.selected_node,
+                        );
+                        runtime.last_status = "Deleted shared provider registration.".into();
+                    } else {
+                        runtime.last_status = "Selected provider no longer exists.".into();
+                    }
+                } else {
+                    runtime.last_status =
+                        "Add or select a shared provider before deleting it.".into();
                 }
             }
             NodeAction::PreviousModel(node_id) => {
                 session.select_node(Some(node_id));
-                let available_models = document
-                    .node(node_id)
-                    .and_then(|node| match &node.value {
-                        NodeValue::Model { provider_id, .. } => provider_id.as_deref(),
-                        _ => None,
-                    })
+                commit_provider_edit(
+                    &mut provider_editing,
+                    &mut document,
+                    &mut providers,
+                    &mut runtime,
+                    &mut editing,
+                    session.selected_node,
+                );
+                let available_models = model_provider_id(&document, node_id)
+                    .as_deref()
                     .and_then(|id| providers.provider(id))
                     .map(|provider| provider.cached_models.clone())
                     .unwrap_or_default();
@@ -1169,23 +1108,22 @@ fn handle_node_buttons(
                     runtime.last_status =
                         "No cached model suggestions are available; type the model name manually."
                             .into();
-                } else if editing.target == Some((node_id, EditField::Value))
-                    && let Some(value) = document
-                        .node(node_id)
-                        .and_then(GraphNode::editable_value_text)
-                {
-                    editing.buffer = value;
-                    editing.mark_changed();
+                } else {
+                    sync_inline_value_editor(&document, &mut editing, node_id);
                 }
             }
             NodeAction::NextModel(node_id) => {
                 session.select_node(Some(node_id));
-                let available_models = document
-                    .node(node_id)
-                    .and_then(|node| match &node.value {
-                        NodeValue::Model { provider_id, .. } => provider_id.as_deref(),
-                        _ => None,
-                    })
+                commit_provider_edit(
+                    &mut provider_editing,
+                    &mut document,
+                    &mut providers,
+                    &mut runtime,
+                    &mut editing,
+                    session.selected_node,
+                );
+                let available_models = model_provider_id(&document, node_id)
+                    .as_deref()
                     .and_then(|id| providers.provider(id))
                     .map(|provider| provider.cached_models.clone())
                     .unwrap_or_default();
@@ -1193,29 +1131,217 @@ fn handle_node_buttons(
                     runtime.last_status =
                         "No cached model suggestions are available; type the model name manually."
                             .into();
-                } else if editing.target == Some((node_id, EditField::Value))
-                    && let Some(value) = document
-                        .node(node_id)
-                        .and_then(GraphNode::editable_value_text)
-                {
-                    editing.buffer = value;
-                    editing.mark_changed();
+                } else {
+                    sync_inline_value_editor(&document, &mut editing, node_id);
                 }
             }
             NodeAction::RefreshProvider(node_id) => {
                 session.select_node(Some(node_id));
-                if let Some(provider_id) =
-                    document.node(node_id).and_then(|node| match &node.value {
-                        NodeValue::Model { provider_id, .. } => provider_id.clone(),
-                        _ => None,
-                    })
-                    && let Some(provider) = providers.provider(&provider_id).cloned()
-                {
-                    providers.mark_refreshing(&provider_id);
-                    persist_provider_registry(&providers, &mut runtime);
-                    runtime.request_provider_refresh(provider);
+                commit_provider_edit(
+                    &mut provider_editing,
+                    &mut document,
+                    &mut providers,
+                    &mut runtime,
+                    &mut editing,
+                    session.selected_node,
+                );
+                if let Some(provider_id) = model_provider_id(&document, node_id) {
+                    queue_provider_refresh(&mut providers, &mut runtime, &provider_id);
                 } else {
                     runtime.last_status = "Select a provider before refreshing models.".into();
+                }
+            }
+            NodeAction::PreviousProviderKind(node_id) | NodeAction::NextProviderKind(node_id) => {
+                session.select_node(Some(node_id));
+                commit_provider_edit(
+                    &mut provider_editing,
+                    &mut document,
+                    &mut providers,
+                    &mut runtime,
+                    &mut editing,
+                    session.selected_node,
+                );
+                if let Some(provider_id) = model_provider_id(&document, node_id) {
+                    if let Some(provider) = providers.provider_mut(&provider_id) {
+                        let direction = if matches!(button.0, NodeAction::PreviousProviderKind(_)) {
+                            -1
+                        } else {
+                            1
+                        };
+                        provider.set_kind(provider.kind.shifted(direction));
+                        providers.touch();
+                        persist_provider_registry(&providers, &mut runtime);
+                        document.apply_provider_registry(&providers);
+                        sync_selected_inline_value_editor(
+                            &document,
+                            &mut editing,
+                            session.selected_node,
+                        );
+                        maybe_refresh_provider_after_mutation(
+                            &mut providers,
+                            &mut runtime,
+                            &provider_id,
+                        );
+                    }
+                } else {
+                    runtime.last_status =
+                        "Add or select a shared provider before changing its kind.".into();
+                }
+            }
+            NodeAction::PreviousProviderVariant(node_id)
+            | NodeAction::NextProviderVariant(node_id) => {
+                session.select_node(Some(node_id));
+                commit_provider_edit(
+                    &mut provider_editing,
+                    &mut document,
+                    &mut providers,
+                    &mut runtime,
+                    &mut editing,
+                    session.selected_node,
+                );
+                if let Some(provider_id) = model_provider_id(&document, node_id) {
+                    if let Some(provider) = providers.provider_mut(&provider_id) {
+                        let direction =
+                            if matches!(button.0, NodeAction::PreviousProviderVariant(_)) {
+                                -1
+                            } else {
+                                1
+                            };
+                        provider.cycle_variant(direction);
+                        providers.touch();
+                        persist_provider_registry(&providers, &mut runtime);
+                        document.apply_provider_registry(&providers);
+                        sync_selected_inline_value_editor(
+                            &document,
+                            &mut editing,
+                            session.selected_node,
+                        );
+                        maybe_refresh_provider_after_mutation(
+                            &mut providers,
+                            &mut runtime,
+                            &provider_id,
+                        );
+                    }
+                } else {
+                    runtime.last_status =
+                        "Add or select a shared provider before changing its variant.".into();
+                }
+            }
+            NodeAction::PreviousAzureAuth(node_id) | NodeAction::NextAzureAuth(node_id) => {
+                session.select_node(Some(node_id));
+                commit_provider_edit(
+                    &mut provider_editing,
+                    &mut document,
+                    &mut providers,
+                    &mut runtime,
+                    &mut editing,
+                    session.selected_node,
+                );
+                if let Some(provider_id) = model_provider_id(&document, node_id) {
+                    let mut changed = false;
+                    if let Some(provider) = providers.provider_mut(&provider_id)
+                        && let ProviderConfig::Azure(config) = &mut provider.config
+                    {
+                        let direction = if matches!(button.0, NodeAction::PreviousAzureAuth(_)) {
+                            -1
+                        } else {
+                            1
+                        };
+                        config.auth_kind = config.auth_kind.shifted(direction);
+                        provider.invalidate_runtime_state();
+                        changed = true;
+                    }
+                    if changed {
+                        providers.touch();
+                        persist_provider_registry(&providers, &mut runtime);
+                        document.apply_provider_registry(&providers);
+                        sync_selected_inline_value_editor(
+                            &document,
+                            &mut editing,
+                            session.selected_node,
+                        );
+                        maybe_refresh_provider_after_mutation(
+                            &mut providers,
+                            &mut runtime,
+                            &provider_id,
+                        );
+                    } else {
+                        runtime.last_status =
+                            "Azure auth mode is only available for Azure providers.".into();
+                    }
+                } else {
+                    runtime.last_status =
+                        "Add or select a shared provider before changing Azure auth.".into();
+                }
+            }
+            NodeAction::PreviousHuggingFaceSubprovider(node_id)
+            | NodeAction::NextHuggingFaceSubprovider(node_id) => {
+                session.select_node(Some(node_id));
+                commit_provider_edit(
+                    &mut provider_editing,
+                    &mut document,
+                    &mut providers,
+                    &mut runtime,
+                    &mut editing,
+                    session.selected_node,
+                );
+                if let Some(provider_id) = model_provider_id(&document, node_id) {
+                    let mut changed = false;
+                    if let Some(provider) = providers.provider_mut(&provider_id)
+                        && let ProviderConfig::HuggingFace(config) = &mut provider.config
+                    {
+                        let direction =
+                            if matches!(button.0, NodeAction::PreviousHuggingFaceSubprovider(_)) {
+                                -1
+                            } else {
+                                1
+                            };
+                        config.subprovider = config.subprovider.shifted(direction);
+                        provider.invalidate_runtime_state();
+                        changed = true;
+                    }
+                    if changed {
+                        providers.touch();
+                        persist_provider_registry(&providers, &mut runtime);
+                        document.apply_provider_registry(&providers);
+                        sync_selected_inline_value_editor(
+                            &document,
+                            &mut editing,
+                            session.selected_node,
+                        );
+                        maybe_refresh_provider_after_mutation(
+                            &mut providers,
+                            &mut runtime,
+                            &provider_id,
+                        );
+                    } else {
+                        runtime.last_status =
+                            "HF subprovider is only available for Hugging Face providers.".into();
+                    }
+                } else {
+                    runtime.last_status =
+                        "Add or select a shared provider before changing HF routing.".into();
+                }
+            }
+            NodeAction::EditProviderField(node_id, field) => {
+                session.select_node(Some(node_id));
+                commit_provider_edit(
+                    &mut provider_editing,
+                    &mut document,
+                    &mut providers,
+                    &mut runtime,
+                    &mut editing,
+                    session.selected_node,
+                );
+                if !begin_provider_field_edit(
+                    &mut provider_editing,
+                    &document,
+                    &providers,
+                    node_id,
+                    field,
+                ) {
+                    runtime.last_status =
+                        "Add or select a shared provider before editing its fields.".into();
                 }
             }
             NodeAction::RunAgent(node_id) => {
@@ -1264,11 +1390,11 @@ fn handle_text_edit_input(
     mut key_events: MessageReader<KeyboardInput>,
     keys: Res<ButtonInput<KeyCode>>,
     mut editing: ResMut<TextEditingState>,
-    provider_panel: Res<ProviderPanelState>,
+    provider_editing: Res<ProviderEditingState>,
     mut document: ResMut<GraphDocument>,
     mut runtime: ResMut<RigEditorRuntime>,
 ) {
-    if provider_panel.editing.is_some() {
+    if provider_editing.editing.is_some() {
         return;
     }
 
@@ -1389,12 +1515,12 @@ fn handle_palette_shortcuts(
     mut document: ResMut<GraphDocument>,
     mut session: ResMut<EditorSession>,
     mut editing: ResMut<TextEditingState>,
-    provider_panel: Res<ProviderPanelState>,
+    provider_editing: Res<ProviderEditingState>,
     mut palette: ResMut<NodePaletteState>,
     mut context_menu: ResMut<NodeContextMenuState>,
     canvas_query: Query<&ComputedNode, With<CanvasSurface>>,
 ) {
-    if editing.target.is_some() || provider_panel.editing.is_some() {
+    if editing.target.is_some() || provider_editing.editing.is_some() {
         return;
     }
 
@@ -1748,15 +1874,14 @@ fn provider_field_is_secret(provider: &ProviderRegistration, field: ProviderText
 
 fn provider_field_display(
     provider: &ProviderRegistration,
-    panel: &ProviderPanelState,
+    provider_editing: &ProviderEditingState,
+    node_id: NodeId,
     field: ProviderTextField,
 ) -> String {
-    if panel
-        .editing
-        .as_ref()
-        .is_some_and(|target| target.provider_id == provider.id && target.field == field)
-    {
-        return editing_text_with_cursor(&panel.buffer);
+    if provider_editing.editing.as_ref().is_some_and(|target| {
+        target.node_id == node_id && target.provider_id == provider.id && target.field == field
+    }) {
+        return editing_text_with_cursor(&provider_editing.buffer);
     }
 
     let raw = provider_field_value(provider, field);
@@ -1772,6 +1897,75 @@ fn provider_field_display(
         mask_secret(&raw)
     } else {
         raw
+    }
+}
+
+fn model_provider_id(document: &GraphDocument, node_id: NodeId) -> Option<ProviderId> {
+    document.node(node_id).and_then(|node| match &node.value {
+        NodeValue::Model { provider_id, .. } => provider_id.clone(),
+        _ => None,
+    })
+}
+
+fn sync_inline_value_editor(
+    document: &GraphDocument,
+    editing: &mut TextEditingState,
+    node_id: NodeId,
+) {
+    if editing.target == Some((node_id, EditField::Value))
+        && let Some(value) = document
+            .node(node_id)
+            .and_then(GraphNode::editable_value_text)
+    {
+        editing.buffer = value;
+        editing.mark_changed();
+    }
+}
+
+fn sync_selected_inline_value_editor(
+    document: &GraphDocument,
+    editing: &mut TextEditingState,
+    selected_node: Option<NodeId>,
+) {
+    if let Some(node_id) = selected_node {
+        sync_inline_value_editor(document, editing, node_id);
+    }
+}
+
+fn clear_provider_edit_if_matches(provider_editing: &mut ProviderEditingState, provider_id: &str) {
+    if provider_editing
+        .editing
+        .as_ref()
+        .is_some_and(|target| target.provider_id == provider_id)
+    {
+        provider_editing.clear_edit();
+    }
+}
+
+fn queue_provider_refresh(
+    providers: &mut ProviderRegistry,
+    runtime: &mut RigEditorRuntime,
+    provider_id: &str,
+) {
+    if let Some(provider) = providers.provider(provider_id).cloned() {
+        providers.mark_refreshing(provider_id);
+        persist_provider_registry(providers, runtime);
+        runtime.request_provider_refresh(provider);
+    }
+}
+
+fn maybe_refresh_provider_after_mutation(
+    providers: &mut ProviderRegistry,
+    runtime: &mut RigEditorRuntime,
+    provider_id: &str,
+) {
+    if let Some(error) = providers
+        .provider(provider_id)
+        .and_then(ProviderRegistration::config_error)
+    {
+        runtime.last_status = error;
+    } else {
+        queue_provider_refresh(providers, runtime, provider_id);
     }
 }
 
@@ -1803,11 +1997,14 @@ fn replace_optional_string(slot: &mut Option<String>, next: String) -> bool {
 }
 
 fn commit_provider_edit(
-    panel: &mut ProviderPanelState,
+    provider_editing: &mut ProviderEditingState,
+    document: &mut GraphDocument,
     providers: &mut ProviderRegistry,
     runtime: &mut RigEditorRuntime,
+    editing: &mut TextEditingState,
+    selected_node: Option<NodeId>,
 ) -> bool {
-    let Some(target) = panel.editing.clone() else {
+    let Some(target) = provider_editing.editing.clone() else {
         return false;
     };
 
@@ -1816,7 +2013,7 @@ fn commit_provider_edit(
     let mut message = None;
 
     if let Some(provider) = providers.provider_mut(&target.provider_id) {
-        changed = set_provider_field_value(provider, target.field, panel.buffer.clone());
+        changed = set_provider_field_value(provider, target.field, provider_editing.buffer.clone());
         if changed {
             refresh_needed = !matches!(target.field, ProviderTextField::Name);
             if refresh_needed {
@@ -1831,251 +2028,52 @@ fn commit_provider_edit(
     if changed {
         providers.touch();
         persist_provider_registry(providers, runtime);
+        document.apply_provider_registry(providers);
+        sync_selected_inline_value_editor(document, editing, selected_node);
         if refresh_needed {
-            let config_error = providers
-                .provider(&target.provider_id)
-                .and_then(ProviderRegistration::config_error);
-            if let Some(error) = config_error {
-                runtime.last_status = error;
-            } else if let Some(provider) = providers.provider(&target.provider_id).cloned() {
-                providers.mark_refreshing(&target.provider_id);
-                persist_provider_registry(providers, runtime);
-                runtime.request_provider_refresh(provider);
-            }
+            maybe_refresh_provider_after_mutation(providers, runtime, &target.provider_id);
         } else if let Some(message) = message {
             runtime.last_status = message;
         }
     }
 
-    panel.clear_edit();
+    provider_editing.clear_edit();
     changed
 }
 
 fn begin_provider_field_edit(
-    panel: &mut ProviderPanelState,
+    provider_editing: &mut ProviderEditingState,
+    document: &GraphDocument,
     providers: &ProviderRegistry,
+    node_id: NodeId,
     field: ProviderTextField,
-) {
-    let Some(provider_id) = panel.selected_provider.clone() else {
-        return;
+) -> bool {
+    let Some(provider_id) = model_provider_id(document, node_id) else {
+        return false;
     };
     let Some(provider) = providers.provider(&provider_id) else {
-        return;
+        return false;
     };
-    panel.begin_edit(provider_id, field, provider_field_value(provider, field));
+    provider_editing.begin_edit(
+        node_id,
+        provider_id,
+        field,
+        provider_field_value(provider, field),
+    );
+    true
 }
 
-fn handle_provider_panel_buttons(
-    mut providers: ResMut<ProviderRegistry>,
-    mut runtime: ResMut<RigEditorRuntime>,
-    mut panel: ResMut<ProviderPanelState>,
-    mut interactions: Query<
-        (&Interaction, &ProviderPanelButton, &mut BackgroundColor),
-        Changed<Interaction>,
-    >,
-) {
-    panel.sync_selection(&providers);
-
-    for (interaction, button, mut background) in &mut interactions {
-        background.0 = button_background(*interaction);
-        if *interaction != Interaction::Pressed {
-            continue;
-        }
-
-        match &button.0 {
-            ProviderPanelAction::TogglePanel => {
-                if panel.visible {
-                    commit_provider_edit(&mut panel, &mut providers, &mut runtime);
-                    panel.close();
-                } else {
-                    panel.open();
-                    panel.sync_selection(&providers);
-                }
-            }
-            ProviderPanelAction::PreviousProvider => {
-                commit_provider_edit(&mut panel, &mut providers, &mut runtime);
-                panel.selected_provider =
-                    providers.cycle_provider_id(panel.selected_provider.as_deref(), -1);
-                panel.mark_changed();
-            }
-            ProviderPanelAction::NextProvider => {
-                commit_provider_edit(&mut panel, &mut providers, &mut runtime);
-                panel.selected_provider =
-                    providers.cycle_provider_id(panel.selected_provider.as_deref(), 1);
-                panel.mark_changed();
-            }
-            ProviderPanelAction::AddProvider => {
-                commit_provider_edit(&mut panel, &mut providers, &mut runtime);
-                let kind = panel
-                    .selected_provider
-                    .as_deref()
-                    .and_then(|id| providers.provider(id))
-                    .map(|provider| provider.kind)
-                    .unwrap_or(ProviderKind::Ollama);
-                let provider_id = providers.add_provider(kind);
-                persist_provider_registry(&providers, &mut runtime);
-                panel.selected_provider = Some(provider_id.clone());
-                panel.mark_changed();
-                if let Some(provider) = providers.provider(&provider_id).cloned() {
-                    providers.mark_refreshing(&provider_id);
-                    runtime.request_provider_refresh(provider);
-                }
-            }
-            ProviderPanelAction::DeleteProvider => {
-                commit_provider_edit(&mut panel, &mut providers, &mut runtime);
-                if let Some(provider_id) = panel.selected_provider.clone()
-                    && providers.remove_provider(&provider_id)
-                {
-                    persist_provider_registry(&providers, &mut runtime);
-                    panel.selected_provider = providers.first_provider_id();
-                    panel.mark_changed();
-                    runtime.last_status = "Deleted provider registration.".into();
-                }
-            }
-            ProviderPanelAction::RefreshProvider => {
-                commit_provider_edit(&mut panel, &mut providers, &mut runtime);
-                if let Some(provider_id) = panel.selected_provider.clone()
-                    && let Some(provider) = providers.provider(&provider_id).cloned()
-                {
-                    providers.mark_refreshing(&provider_id);
-                    persist_provider_registry(&providers, &mut runtime);
-                    runtime.request_provider_refresh(provider);
-                }
-            }
-            ProviderPanelAction::PreviousKind | ProviderPanelAction::NextKind => {
-                commit_provider_edit(&mut panel, &mut providers, &mut runtime);
-                if let Some(provider_id) = panel.selected_provider.clone() {
-                    let direction = if matches!(button.0, ProviderPanelAction::PreviousKind) {
-                        -1
-                    } else {
-                        1
-                    };
-                    if let Some(provider) = providers.provider_mut(&provider_id) {
-                        provider.set_kind(provider.kind.shifted(direction));
-                        providers.touch();
-                        persist_provider_registry(&providers, &mut runtime);
-                        if let Some(provider) = providers.provider(&provider_id).cloned() {
-                            if provider.config_error().is_none() {
-                                providers.mark_refreshing(&provider_id);
-                                runtime.request_provider_refresh(provider);
-                            } else {
-                                runtime.last_status = provider.status.detail.clone();
-                            }
-                        }
-                    }
-                    panel.mark_changed();
-                }
-            }
-            ProviderPanelAction::PreviousVariant | ProviderPanelAction::NextVariant => {
-                commit_provider_edit(&mut panel, &mut providers, &mut runtime);
-                if let Some(provider_id) = panel.selected_provider.clone() {
-                    let direction = if matches!(button.0, ProviderPanelAction::PreviousVariant) {
-                        -1
-                    } else {
-                        1
-                    };
-                    if let Some(provider) = providers.provider_mut(&provider_id) {
-                        provider.cycle_variant(direction);
-                        providers.touch();
-                        persist_provider_registry(&providers, &mut runtime);
-                        if let Some(provider) = providers.provider(&provider_id).cloned() {
-                            if provider.config_error().is_none() {
-                                providers.mark_refreshing(&provider_id);
-                                runtime.request_provider_refresh(provider);
-                            } else {
-                                runtime.last_status = provider.status.detail.clone();
-                            }
-                        }
-                    }
-                    panel.mark_changed();
-                }
-            }
-            ProviderPanelAction::PreviousAzureAuth | ProviderPanelAction::NextAzureAuth => {
-                commit_provider_edit(&mut panel, &mut providers, &mut runtime);
-                if let Some(provider_id) = panel.selected_provider.clone() {
-                    let direction = if matches!(button.0, ProviderPanelAction::PreviousAzureAuth) {
-                        -1
-                    } else {
-                        1
-                    };
-                    let mut config_error = None;
-                    let mut status_detail = None;
-                    if let Some(provider) = providers.provider_mut(&provider_id)
-                        && let ProviderConfig::Azure(config) = &mut provider.config
-                    {
-                        config.auth_kind = config.auth_kind.shifted(direction);
-                        provider.invalidate_runtime_state();
-                        config_error = provider.config_error();
-                        status_detail = Some(provider.status.detail.clone());
-                    }
-                    if status_detail.is_some() {
-                        providers.touch();
-                        persist_provider_registry(&providers, &mut runtime);
-                        if config_error.is_none() {
-                            if let Some(provider) = providers.provider(&provider_id).cloned() {
-                                providers.mark_refreshing(&provider_id);
-                                runtime.request_provider_refresh(provider);
-                            }
-                        } else if let Some(detail) = status_detail {
-                            runtime.last_status = detail;
-                        }
-                        panel.mark_changed();
-                    }
-                }
-            }
-            ProviderPanelAction::PreviousHuggingFaceSubprovider
-            | ProviderPanelAction::NextHuggingFaceSubprovider => {
-                commit_provider_edit(&mut panel, &mut providers, &mut runtime);
-                if let Some(provider_id) = panel.selected_provider.clone() {
-                    let direction = if matches!(
-                        button.0,
-                        ProviderPanelAction::PreviousHuggingFaceSubprovider
-                    ) {
-                        -1
-                    } else {
-                        1
-                    };
-                    let mut config_error = None;
-                    let mut status_detail = None;
-                    if let Some(provider) = providers.provider_mut(&provider_id)
-                        && let ProviderConfig::HuggingFace(config) = &mut provider.config
-                    {
-                        config.subprovider = config.subprovider.shifted(direction);
-                        provider.invalidate_runtime_state();
-                        config_error = provider.config_error();
-                        status_detail = Some(provider.status.detail.clone());
-                    }
-                    if status_detail.is_some() {
-                        providers.touch();
-                        persist_provider_registry(&providers, &mut runtime);
-                        if config_error.is_none() {
-                            if let Some(provider) = providers.provider(&provider_id).cloned() {
-                                providers.mark_refreshing(&provider_id);
-                                runtime.request_provider_refresh(provider);
-                            }
-                        } else if let Some(detail) = status_detail {
-                            runtime.last_status = detail;
-                        }
-                        panel.mark_changed();
-                    }
-                }
-            }
-            ProviderPanelAction::EditField(field) => {
-                commit_provider_edit(&mut panel, &mut providers, &mut runtime);
-                begin_provider_field_edit(&mut panel, &providers, *field);
-            }
-        }
-    }
-}
-
-fn handle_provider_text_edit_input(
+fn handle_provider_edit_input(
     mut key_events: MessageReader<KeyboardInput>,
     keys: Res<ButtonInput<KeyCode>>,
+    mut document: ResMut<GraphDocument>,
     mut providers: ResMut<ProviderRegistry>,
+    session: Res<EditorSession>,
+    mut editing: ResMut<TextEditingState>,
     mut runtime: ResMut<RigEditorRuntime>,
-    mut panel: ResMut<ProviderPanelState>,
+    mut provider_editing: ResMut<ProviderEditingState>,
 ) {
-    if panel.editing.is_none() {
+    if provider_editing.editing.is_none() {
         return;
     }
     let modifier_pressed = command_modifier_pressed(&keys);
@@ -2088,12 +2086,12 @@ fn handle_provider_text_edit_input(
         match handle_text_clipboard_shortcut(
             event.key_code,
             modifier_pressed,
-            &mut panel.buffer,
+            &mut provider_editing.buffer,
             TextPasteMode::SingleLine,
         ) {
             Ok(Some(changed)) => {
                 if changed {
-                    panel.mark_changed();
+                    provider_editing.mark_changed();
                 }
                 continue;
             }
@@ -2110,16 +2108,23 @@ fn handle_provider_text_edit_input(
 
         match event.key_code {
             KeyCode::Escape => {
-                panel.clear_edit();
+                provider_editing.clear_edit();
                 return;
             }
             KeyCode::Backspace => {
-                panel.buffer.pop();
-                panel.mark_changed();
+                provider_editing.buffer.pop();
+                provider_editing.mark_changed();
                 continue;
             }
             KeyCode::Enter | KeyCode::NumpadEnter => {
-                commit_provider_edit(&mut panel, &mut providers, &mut runtime);
+                commit_provider_edit(
+                    &mut provider_editing,
+                    &mut document,
+                    &mut providers,
+                    &mut runtime,
+                    &mut editing,
+                    session.selected_node,
+                );
                 return;
             }
             KeyCode::Tab => continue,
@@ -2129,8 +2134,8 @@ fn handle_provider_text_edit_input(
         if let Some(text) = &event.text
             && !text.chars().all(char::is_control)
         {
-            panel.buffer.push_str(text);
-            panel.mark_changed();
+            provider_editing.buffer.push_str(text);
+            provider_editing.mark_changed();
         }
     }
 }
@@ -2359,406 +2364,6 @@ fn sync_context_menu_view(
     registry.last_context_menu_revision = context_menu.revision;
 }
 
-fn sync_provider_panel_view(
-    mut commands: Commands,
-    panel: Res<ProviderPanelState>,
-    providers: Res<ProviderRegistry>,
-    mut registry: ResMut<GraphUiRegistry>,
-    fonts: Res<EditorFont>,
-) {
-    if registry.last_provider_panel_revision == panel.revision
-        && registry.last_provider_registry_revision == providers.revision
-    {
-        return;
-    }
-
-    if let Some(entity) = registry.provider_panel_view.take() {
-        commands.entity(entity).despawn();
-    }
-
-    if panel.visible {
-        let Some(parent) = registry.provider_panel_parent else {
-            return;
-        };
-
-        let selected_provider = panel
-            .selected_provider
-            .as_deref()
-            .and_then(|id| providers.provider(id))
-            .or_else(|| {
-                providers
-                    .first_provider_id()
-                    .as_deref()
-                    .and_then(|id| providers.provider(id))
-            });
-
-        let panel_entity = commands
-            .spawn((
-                Node {
-                    position_type: PositionType::Absolute,
-                    top: Val::Px(68.0),
-                    right: Val::Px(18.0),
-                    width: Val::Px(388.0),
-                    max_height: Val::Percent(86.0),
-                    padding: UiRect::all(Val::Px(12.0)),
-                    flex_direction: FlexDirection::Column,
-                    row_gap: Val::Px(10.0),
-                    border: UiRect::all(Val::Px(1.0)),
-                    border_radius: BorderRadius::all(Val::Px(14.0)),
-                    overflow: Overflow::clip_y(),
-                    ..default()
-                },
-                BackgroundColor(Color::srgb_u8(26, 27, 31)),
-                BorderColor::all(Color::srgb_u8(66, 69, 76)),
-                GlobalZIndex(55),
-            ))
-            .observe(|mut click: On<Pointer<Click>>| {
-                click.propagate(false);
-            })
-            .with_children(|parent| {
-                parent
-                    .spawn((
-                        Node {
-                            width: Val::Percent(100.0),
-                            justify_content: JustifyContent::SpaceBetween,
-                            align_items: AlignItems::Center,
-                            ..default()
-                        },
-                        Pickable::IGNORE,
-                    ))
-                    .with_children(|row| {
-                        row.spawn((
-                            Text::new("Provider Registry"),
-                            editor_text_font(&fonts, 16.0),
-                            TextColor(Color::srgb_u8(236, 238, 241)),
-                            Pickable::IGNORE,
-                        ));
-                        spawn_provider_panel_button(
-                            row,
-                            "Hide",
-                            ProviderPanelAction::TogglePanel,
-                            &fonts,
-                        );
-                    });
-
-                if let Some(provider) = selected_provider {
-                    parent
-                        .spawn((
-                            Node {
-                                width: Val::Percent(100.0),
-                                align_items: AlignItems::Center,
-                                column_gap: Val::Px(8.0),
-                                ..default()
-                            },
-                            Pickable::IGNORE,
-                        ))
-                        .with_children(|row| {
-                            spawn_provider_panel_button(
-                                row,
-                                "‹",
-                                ProviderPanelAction::PreviousProvider,
-                                &fonts,
-                            );
-                            row.spawn((
-                                Node {
-                                    flex_grow: 1.0,
-                                    padding: UiRect::axes(Val::Px(8.0), Val::Px(6.0)),
-                                    border: UiRect::all(Val::Px(1.0)),
-                                    border_radius: BorderRadius::all(Val::Px(8.0)),
-                                    ..default()
-                                },
-                                BackgroundColor(Color::srgb_u8(18, 19, 22)),
-                                BorderColor::all(Color::srgb_u8(56, 58, 64)),
-                                Pickable::IGNORE,
-                            ))
-                            .with_children(|label| {
-                                label.spawn((
-                                    Text::new(provider.display_name()),
-                                    editor_text_font(&fonts, 13.0),
-                                    TextColor(Color::srgb_u8(236, 238, 241)),
-                                    Pickable::IGNORE,
-                                ));
-                            });
-                            spawn_provider_panel_button(
-                                row,
-                                "›",
-                                ProviderPanelAction::NextProvider,
-                                &fonts,
-                            );
-                        });
-
-                    parent
-                        .spawn((
-                            Node {
-                                width: Val::Percent(100.0),
-                                flex_direction: FlexDirection::Row,
-                                column_gap: Val::Px(8.0),
-                                ..default()
-                            },
-                            Pickable::IGNORE,
-                        ))
-                        .with_children(|row| {
-                            spawn_provider_panel_button(
-                                row,
-                                "Add",
-                                ProviderPanelAction::AddProvider,
-                                &fonts,
-                            );
-                            spawn_provider_panel_button(
-                                row,
-                                "Delete",
-                                ProviderPanelAction::DeleteProvider,
-                                &fonts,
-                            );
-                            spawn_provider_panel_button(
-                                row,
-                                "Refresh",
-                                ProviderPanelAction::RefreshProvider,
-                                &fonts,
-                            );
-                        });
-
-                    parent
-                        .spawn((
-                            Node {
-                                width: Val::Percent(100.0),
-                                align_items: AlignItems::Center,
-                                column_gap: Val::Px(8.0),
-                                ..default()
-                            },
-                            Pickable::IGNORE,
-                        ))
-                        .with_children(|row| {
-                            row.spawn((
-                                Text::new("Kind"),
-                                editor_text_font(&fonts, 12.0),
-                                TextColor(Color::srgb_u8(164, 170, 180)),
-                                Pickable::IGNORE,
-                            ));
-                            spawn_provider_panel_button(
-                                row,
-                                "‹",
-                                ProviderPanelAction::PreviousKind,
-                                &fonts,
-                            );
-                            row.spawn((
-                                Text::new(provider.kind.label()),
-                                editor_text_font(&fonts, 13.0),
-                                TextColor(Color::srgb_u8(236, 238, 241)),
-                                Pickable::IGNORE,
-                            ));
-                            spawn_provider_panel_button(
-                                row,
-                                "›",
-                                ProviderPanelAction::NextKind,
-                                &fonts,
-                            );
-                        });
-
-                    if provider.kind.supported_variants().len() > 1 {
-                        parent
-                            .spawn((
-                                Node {
-                                    width: Val::Percent(100.0),
-                                    align_items: AlignItems::Center,
-                                    column_gap: Val::Px(8.0),
-                                    ..default()
-                                },
-                                Pickable::IGNORE,
-                            ))
-                            .with_children(|row| {
-                                row.spawn((
-                                    Text::new("Variant"),
-                                    editor_text_font(&fonts, 12.0),
-                                    TextColor(Color::srgb_u8(164, 170, 180)),
-                                    Pickable::IGNORE,
-                                ));
-                                spawn_provider_panel_button(
-                                    row,
-                                    "‹",
-                                    ProviderPanelAction::PreviousVariant,
-                                    &fonts,
-                                );
-                                row.spawn((
-                                    Text::new(provider.variant.label()),
-                                    editor_text_font(&fonts, 13.0),
-                                    TextColor(Color::srgb_u8(236, 238, 241)),
-                                    Pickable::IGNORE,
-                                ));
-                                spawn_provider_panel_button(
-                                    row,
-                                    "›",
-                                    ProviderPanelAction::NextVariant,
-                                    &fonts,
-                                );
-                            });
-                    }
-
-                    if let ProviderConfig::Azure(config) = &provider.config {
-                        parent
-                            .spawn((
-                                Node {
-                                    width: Val::Percent(100.0),
-                                    align_items: AlignItems::Center,
-                                    column_gap: Val::Px(8.0),
-                                    ..default()
-                                },
-                                Pickable::IGNORE,
-                            ))
-                            .with_children(|row| {
-                                row.spawn((
-                                    Text::new("Azure Auth"),
-                                    editor_text_font(&fonts, 12.0),
-                                    TextColor(Color::srgb_u8(164, 170, 180)),
-                                    Pickable::IGNORE,
-                                ));
-                                spawn_provider_panel_button(
-                                    row,
-                                    "‹",
-                                    ProviderPanelAction::PreviousAzureAuth,
-                                    &fonts,
-                                );
-                                row.spawn((
-                                    Text::new(config.auth_kind.label()),
-                                    editor_text_font(&fonts, 13.0),
-                                    TextColor(Color::srgb_u8(236, 238, 241)),
-                                    Pickable::IGNORE,
-                                ));
-                                spawn_provider_panel_button(
-                                    row,
-                                    "›",
-                                    ProviderPanelAction::NextAzureAuth,
-                                    &fonts,
-                                );
-                            });
-                    }
-
-                    if let ProviderConfig::HuggingFace(config) = &provider.config {
-                        parent
-                            .spawn((
-                                Node {
-                                    width: Val::Percent(100.0),
-                                    align_items: AlignItems::Center,
-                                    column_gap: Val::Px(8.0),
-                                    ..default()
-                                },
-                                Pickable::IGNORE,
-                            ))
-                            .with_children(|row| {
-                                row.spawn((
-                                    Text::new("HF Subprovider"),
-                                    editor_text_font(&fonts, 12.0),
-                                    TextColor(Color::srgb_u8(164, 170, 180)),
-                                    Pickable::IGNORE,
-                                ));
-                                spawn_provider_panel_button(
-                                    row,
-                                    "‹",
-                                    ProviderPanelAction::PreviousHuggingFaceSubprovider,
-                                    &fonts,
-                                );
-                                row.spawn((
-                                    Text::new(config.subprovider.label()),
-                                    editor_text_font(&fonts, 13.0),
-                                    TextColor(Color::srgb_u8(236, 238, 241)),
-                                    Pickable::IGNORE,
-                                ));
-                                spawn_provider_panel_button(
-                                    row,
-                                    "›",
-                                    ProviderPanelAction::NextHuggingFaceSubprovider,
-                                    &fonts,
-                                );
-                            });
-                    }
-
-                    parent
-                        .spawn((
-                            Node {
-                                width: Val::Percent(100.0),
-                                flex_direction: FlexDirection::Column,
-                                row_gap: Val::Px(8.0),
-                                ..default()
-                            },
-                            Pickable::IGNORE,
-                        ))
-                        .with_children(|fields| {
-                            for field in provider_text_fields(provider) {
-                                let active = panel.editing.as_ref().is_some_and(|target| {
-                                    target.provider_id == provider.id && target.field == field
-                                });
-                                spawn_provider_field_button(
-                                    fields,
-                                    provider_field_label(provider, field),
-                                    &provider_field_display(provider, &panel, field),
-                                    field,
-                                    active,
-                                    &fonts,
-                                );
-                            }
-                        });
-
-                    let status_color = match provider.status.kind {
-                        ProviderStatusKind::Ready => Color::srgb_u8(142, 198, 154),
-                        ProviderStatusKind::Pending => Color::srgb_u8(220, 190, 122),
-                        ProviderStatusKind::NeedsConfig | ProviderStatusKind::Error => {
-                            Color::srgb_u8(220, 140, 132)
-                        }
-                    };
-                    parent.spawn((
-                        Text::new(format!("Status: {}", provider.status.kind.label())),
-                        editor_text_font(&fonts, 12.0),
-                        TextColor(status_color),
-                        Pickable::IGNORE,
-                    ));
-                    parent.spawn((
-                        Text::new(format!(
-                            "Models: {}",
-                            if provider.cached_models.is_empty() {
-                                if provider.manual_model_only() {
-                                    "manual entry only".into()
-                                } else {
-                                    "no cached suggestions".into()
-                                }
-                            } else {
-                                format!("{} cached", provider.cached_models.len())
-                            }
-                        )),
-                        editor_text_font(&fonts, 12.0),
-                        TextColor(Color::srgb_u8(188, 192, 200)),
-                        Pickable::IGNORE,
-                    ));
-                    parent.spawn((
-                        Text::new(provider.status.detail.clone()),
-                        editor_text_font(&fonts, 12.0),
-                        TextColor(Color::srgb_u8(214, 218, 224)),
-                        Pickable::IGNORE,
-                    ));
-                } else {
-                    parent.spawn((
-                        Text::new("No providers registered."),
-                        editor_text_font(&fonts, 13.0),
-                        TextColor(Color::srgb_u8(236, 238, 241)),
-                        Pickable::IGNORE,
-                    ));
-                    spawn_provider_panel_button(
-                        parent,
-                        "Add Provider",
-                        ProviderPanelAction::AddProvider,
-                        &fonts,
-                    );
-                }
-            })
-            .id();
-
-        commands.entity(parent).add_child(panel_entity);
-        registry.provider_panel_view = Some(panel_entity);
-    }
-
-    registry.last_provider_panel_revision = panel.revision;
-    registry.last_provider_registry_revision = providers.revision;
-}
-
 fn sync_hover_hint_view(
     mut commands: Commands,
     hint: Res<HoverHintState>,
@@ -2826,6 +2431,7 @@ fn sync_node_views(
     document: Res<GraphDocument>,
     session: Res<EditorSession>,
     editing: Res<TextEditingState>,
+    provider_editing: Res<ProviderEditingState>,
     providers: Res<ProviderRegistry>,
     mut registry: ResMut<GraphUiRegistry>,
     fonts: Res<EditorFont>,
@@ -2836,6 +2442,7 @@ fn sync_node_views(
 
     if registry.last_graph_revision == document.revision
         && registry.last_node_provider_revision == providers.revision
+        && registry.last_provider_edit_revision == provider_editing.revision
         && (registry.last_zoom - session.zoom).abs() < f32::EPSILON
     {
         return;
@@ -3263,7 +2870,19 @@ fn sync_node_views(
                         Pickable::IGNORE,
                     ))
                     .with_children(|body| {
-                        if is_output_node {
+                        if is_model_node {
+                            spawn_model_node_surface(
+                                body,
+                                node_id,
+                                &node_snapshot,
+                                is_value_editing,
+                                &editing,
+                                &provider_editing,
+                                &providers,
+                                &fonts,
+                                zoom,
+                            );
+                        } else if is_output_node {
                             spawn_text_output_surface(body, &node_snapshot, &fonts, zoom);
                         } else if is_numeric_node {
                             spawn_numeric_value_surface(
@@ -3318,6 +2937,7 @@ fn sync_node_views(
 
     registry.last_graph_revision = document.revision;
     registry.last_node_provider_revision = providers.revision;
+    registry.last_provider_edit_revision = provider_editing.revision;
     registry.last_zoom = session.zoom;
 }
 
@@ -3757,7 +3377,12 @@ fn update_chrome_text(
         let next = if editing.target == Some((label.id, EditField::Value)) {
             editing_text_with_cursor(&editing.buffer)
         } else {
-            node.editable_value_text().unwrap_or_default()
+            match &node.value {
+                NodeValue::Model { model_name, .. } if model_name.trim().is_empty() => {
+                    "(enter a model)".into()
+                }
+                _ => node.editable_value_text().unwrap_or_default(),
+            }
         };
 
         if *text != Text::new(next.clone()) {
@@ -4284,6 +3909,513 @@ fn editable_value_text(
     }
 
     node.editable_value_text()
+}
+
+fn provider_status_color(kind: ProviderStatusKind) -> Color {
+    match kind {
+        ProviderStatusKind::Ready => Color::srgb_u8(142, 198, 154),
+        ProviderStatusKind::Pending => Color::srgb_u8(220, 190, 122),
+        ProviderStatusKind::NeedsConfig | ProviderStatusKind::Error => {
+            Color::srgb_u8(220, 140, 132)
+        }
+    }
+}
+
+fn spawn_model_node_surface(
+    body: &mut ChildSpawnerCommands,
+    node_id: NodeId,
+    node: &GraphNode,
+    is_value_editing: bool,
+    editing: &TextEditingState,
+    provider_editing: &ProviderEditingState,
+    providers: &ProviderRegistry,
+    fonts: &EditorFont,
+    zoom: f32,
+) {
+    let NodeValue::Model { provider_id, .. } = &node.value else {
+        return;
+    };
+
+    let provider = provider_id.as_deref().and_then(|id| providers.provider(id));
+    let model_text = editable_value_text(node, is_value_editing, editing).unwrap_or_default();
+    let model_hint = if provider.is_some_and(ProviderRegistration::manual_model_only) {
+        "Manual model entry"
+    } else {
+        "Click the node body to type, or use arrows for cached suggestions"
+    };
+
+    let cache_summary = match provider {
+        Some(provider) if !provider.cached_models.is_empty() => {
+            format!("{} cached suggestion(s)", provider.cached_models.len())
+        }
+        Some(provider) if provider.manual_model_only() => "Manual entry only".into(),
+        Some(_) => "No cached suggestions yet".into(),
+        None => "No provider selected".into(),
+    };
+    let cache_preview = provider
+        .filter(|provider| !provider.cached_models.is_empty())
+        .map(|provider| {
+            provider
+                .cached_models
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        });
+
+    body.spawn((
+        Node {
+            width: Val::Percent(100.0),
+            flex_grow: 1.0,
+            min_height: Val::Px(0.0),
+            padding: UiRect::all(Val::Px(scaled(10.0, zoom))),
+            flex_direction: FlexDirection::Column,
+            justify_content: JustifyContent::FlexStart,
+            row_gap: Val::Px(scaled(8.0, zoom)),
+            overflow: Overflow::clip(),
+            border_radius: BorderRadius::all(Val::Px(scaled(8.0, zoom))),
+            ..default()
+        },
+        BackgroundColor(Color::srgb_u8(9, 10, 12)),
+        Pickable::IGNORE,
+    ))
+    .with_children(|surface| {
+        surface.spawn((
+            Node {
+                width: Val::Percent(100.0),
+                ..default()
+            },
+            Text::new("Shared provider registration. Edits here affect every Model node using it."),
+            TextLayout::new_with_linebreak(LineBreak::WordOrCharacter),
+            editor_text_font(fonts, scaled_font(11.0, zoom)),
+            TextColor(Color::srgb_u8(162, 168, 178)),
+            Pickable::IGNORE,
+        ));
+
+        surface
+            .spawn((
+                Node {
+                    width: Val::Percent(100.0),
+                    align_items: AlignItems::Center,
+                    column_gap: Val::Px(scaled(8.0, zoom)),
+                    ..default()
+                },
+                Pickable::IGNORE,
+            ))
+            .with_children(|row| {
+                spawn_compact_node_action_button(
+                    row,
+                    "‹",
+                    NodeAction::PreviousProvider(node_id),
+                    fonts,
+                    zoom,
+                );
+                row.spawn((
+                    Node {
+                        flex_grow: 1.0,
+                        padding: UiRect::axes(
+                            Val::Px(scaled(10.0, zoom)),
+                            Val::Px(scaled(8.0, zoom)),
+                        ),
+                        border: UiRect::all(Val::Px(1.0)),
+                        border_radius: BorderRadius::all(Val::Px(scaled(8.0, zoom))),
+                        flex_direction: FlexDirection::Column,
+                        row_gap: Val::Px(scaled(2.0, zoom)),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgb_u8(18, 19, 22)),
+                    BorderColor::all(Color::srgb_u8(56, 58, 64)),
+                    Pickable::IGNORE,
+                ))
+                .with_children(|label| {
+                    label.spawn((
+                        Text::new("Provider"),
+                        editor_text_font(fonts, scaled_font(11.0, zoom)),
+                        TextColor(Color::srgb_u8(164, 170, 180)),
+                        Pickable::IGNORE,
+                    ));
+                    label.spawn((
+                        Text::new(
+                            provider
+                                .map(|provider| provider.display_name().to_string())
+                                .unwrap_or_else(|| "No shared provider registered".into()),
+                        ),
+                        TextLayout::new_with_linebreak(LineBreak::WordOrCharacter),
+                        editor_text_font(fonts, scaled_font(13.0, zoom)),
+                        TextColor(Color::srgb_u8(236, 238, 241)),
+                        Pickable::IGNORE,
+                    ));
+                });
+                spawn_compact_node_action_button(
+                    row,
+                    "›",
+                    NodeAction::NextProvider(node_id),
+                    fonts,
+                    zoom,
+                );
+            });
+
+        surface
+            .spawn((
+                Node {
+                    width: Val::Percent(100.0),
+                    column_gap: Val::Px(scaled(8.0, zoom)),
+                    ..default()
+                },
+                Pickable::IGNORE,
+            ))
+            .with_children(|row| {
+                spawn_scaled_node_action_button(
+                    row,
+                    "Add",
+                    NodeAction::AddProvider(node_id),
+                    fonts,
+                    zoom,
+                );
+                spawn_scaled_node_action_button(
+                    row,
+                    "Del",
+                    NodeAction::DeleteProvider(node_id),
+                    fonts,
+                    zoom,
+                );
+                spawn_scaled_node_action_button(
+                    row,
+                    "Ref",
+                    NodeAction::RefreshProvider(node_id),
+                    fonts,
+                    zoom,
+                );
+            });
+
+        if let Some(provider) = provider {
+            surface
+                .spawn((
+                    Node {
+                        width: Val::Percent(100.0),
+                        align_items: AlignItems::Center,
+                        column_gap: Val::Px(scaled(8.0, zoom)),
+                        ..default()
+                    },
+                    Pickable::IGNORE,
+                ))
+                .with_children(|row| {
+                    row.spawn((
+                        Text::new("Kind"),
+                        editor_text_font(fonts, scaled_font(12.0, zoom)),
+                        TextColor(Color::srgb_u8(164, 170, 180)),
+                        Pickable::IGNORE,
+                    ));
+                    spawn_compact_node_action_button(
+                        row,
+                        "‹",
+                        NodeAction::PreviousProviderKind(node_id),
+                        fonts,
+                        zoom,
+                    );
+                    row.spawn((
+                        Text::new(provider.kind.label()),
+                        editor_text_font(fonts, scaled_font(13.0, zoom)),
+                        TextColor(Color::srgb_u8(236, 238, 241)),
+                        Pickable::IGNORE,
+                    ));
+                    spawn_compact_node_action_button(
+                        row,
+                        "›",
+                        NodeAction::NextProviderKind(node_id),
+                        fonts,
+                        zoom,
+                    );
+                });
+
+            if provider.kind.supported_variants().len() > 1 {
+                surface
+                    .spawn((
+                        Node {
+                            width: Val::Percent(100.0),
+                            align_items: AlignItems::Center,
+                            column_gap: Val::Px(scaled(8.0, zoom)),
+                            ..default()
+                        },
+                        Pickable::IGNORE,
+                    ))
+                    .with_children(|row| {
+                        row.spawn((
+                            Text::new("Variant"),
+                            editor_text_font(fonts, scaled_font(12.0, zoom)),
+                            TextColor(Color::srgb_u8(164, 170, 180)),
+                            Pickable::IGNORE,
+                        ));
+                        spawn_compact_node_action_button(
+                            row,
+                            "‹",
+                            NodeAction::PreviousProviderVariant(node_id),
+                            fonts,
+                            zoom,
+                        );
+                        row.spawn((
+                            Text::new(provider.variant.label()),
+                            editor_text_font(fonts, scaled_font(13.0, zoom)),
+                            TextColor(Color::srgb_u8(236, 238, 241)),
+                            Pickable::IGNORE,
+                        ));
+                        spawn_compact_node_action_button(
+                            row,
+                            "›",
+                            NodeAction::NextProviderVariant(node_id),
+                            fonts,
+                            zoom,
+                        );
+                    });
+            }
+
+            if let ProviderConfig::Azure(config) = &provider.config {
+                surface
+                    .spawn((
+                        Node {
+                            width: Val::Percent(100.0),
+                            align_items: AlignItems::Center,
+                            column_gap: Val::Px(scaled(8.0, zoom)),
+                            ..default()
+                        },
+                        Pickable::IGNORE,
+                    ))
+                    .with_children(|row| {
+                        row.spawn((
+                            Text::new("Azure Auth"),
+                            editor_text_font(fonts, scaled_font(12.0, zoom)),
+                            TextColor(Color::srgb_u8(164, 170, 180)),
+                            Pickable::IGNORE,
+                        ));
+                        spawn_compact_node_action_button(
+                            row,
+                            "‹",
+                            NodeAction::PreviousAzureAuth(node_id),
+                            fonts,
+                            zoom,
+                        );
+                        row.spawn((
+                            Text::new(config.auth_kind.label()),
+                            editor_text_font(fonts, scaled_font(13.0, zoom)),
+                            TextColor(Color::srgb_u8(236, 238, 241)),
+                            Pickable::IGNORE,
+                        ));
+                        spawn_compact_node_action_button(
+                            row,
+                            "›",
+                            NodeAction::NextAzureAuth(node_id),
+                            fonts,
+                            zoom,
+                        );
+                    });
+            }
+
+            if let ProviderConfig::HuggingFace(config) = &provider.config {
+                surface
+                    .spawn((
+                        Node {
+                            width: Val::Percent(100.0),
+                            align_items: AlignItems::Center,
+                            column_gap: Val::Px(scaled(8.0, zoom)),
+                            ..default()
+                        },
+                        Pickable::IGNORE,
+                    ))
+                    .with_children(|row| {
+                        row.spawn((
+                            Text::new("HF Subprovider"),
+                            editor_text_font(fonts, scaled_font(12.0, zoom)),
+                            TextColor(Color::srgb_u8(164, 170, 180)),
+                            Pickable::IGNORE,
+                        ));
+                        spawn_compact_node_action_button(
+                            row,
+                            "‹",
+                            NodeAction::PreviousHuggingFaceSubprovider(node_id),
+                            fonts,
+                            zoom,
+                        );
+                        row.spawn((
+                            Text::new(config.subprovider.label()),
+                            editor_text_font(fonts, scaled_font(13.0, zoom)),
+                            TextColor(Color::srgb_u8(236, 238, 241)),
+                            Pickable::IGNORE,
+                        ));
+                        spawn_compact_node_action_button(
+                            row,
+                            "›",
+                            NodeAction::NextHuggingFaceSubprovider(node_id),
+                            fonts,
+                            zoom,
+                        );
+                    });
+            }
+
+            surface
+                .spawn((
+                    Node {
+                        width: Val::Percent(100.0),
+                        flex_direction: FlexDirection::Column,
+                        row_gap: Val::Px(scaled(8.0, zoom)),
+                        ..default()
+                    },
+                    Pickable::IGNORE,
+                ))
+                .with_children(|fields| {
+                    for field in provider_text_fields(provider) {
+                        let active = provider_editing.editing.as_ref().is_some_and(|target| {
+                            target.node_id == node_id
+                                && target.provider_id == provider.id
+                                && target.field == field
+                        });
+                        spawn_provider_field_button(
+                            fields,
+                            node_id,
+                            provider_field_label(provider, field),
+                            &provider_field_display(provider, provider_editing, node_id, field),
+                            field,
+                            active,
+                            fonts,
+                            zoom,
+                        );
+                    }
+                });
+
+            surface.spawn((
+                Text::new(format!("Status: {}", provider.status.kind.label())),
+                editor_text_font(fonts, scaled_font(12.0, zoom)),
+                TextColor(provider_status_color(provider.status.kind)),
+                Pickable::IGNORE,
+            ));
+            surface.spawn((
+                Text::new(format!("Cache: {cache_summary}")),
+                editor_text_font(fonts, scaled_font(12.0, zoom)),
+                TextColor(Color::srgb_u8(188, 192, 200)),
+                Pickable::IGNORE,
+            ));
+            if let Some(cache_preview) = cache_preview {
+                surface.spawn((
+                    Node {
+                        width: Val::Percent(100.0),
+                        ..default()
+                    },
+                    Text::new(format!("Suggestions: {cache_preview}")),
+                    TextLayout::new_with_linebreak(LineBreak::WordOrCharacter),
+                    editor_text_font(fonts, scaled_font(11.0, zoom)),
+                    TextColor(Color::srgb_u8(164, 170, 180)),
+                    Pickable::IGNORE,
+                ));
+            }
+            surface.spawn((
+                Node {
+                    width: Val::Percent(100.0),
+                    ..default()
+                },
+                Text::new(provider.status.detail.clone()),
+                TextLayout::new_with_linebreak(LineBreak::WordOrCharacter),
+                editor_text_font(fonts, scaled_font(11.0, zoom)),
+                TextColor(Color::srgb_u8(214, 218, 224)),
+                Pickable::IGNORE,
+            ));
+        } else {
+            surface.spawn((
+                Text::new(
+                    "No shared provider registrations exist yet. Add one from this Model node.",
+                ),
+                editor_text_font(fonts, scaled_font(12.0, zoom)),
+                TextColor(Color::srgb_u8(236, 238, 241)),
+                Pickable::IGNORE,
+            ));
+        }
+
+        surface
+            .spawn((
+                Node {
+                    width: Val::Percent(100.0),
+                    flex_direction: FlexDirection::Column,
+                    row_gap: Val::Px(scaled(4.0, zoom)),
+                    ..default()
+                },
+                Pickable::IGNORE,
+            ))
+            .with_children(|column| {
+                column.spawn((
+                    Text::new("Model"),
+                    editor_text_font(fonts, scaled_font(12.0, zoom)),
+                    TextColor(Color::srgb_u8(164, 170, 180)),
+                    Pickable::IGNORE,
+                ));
+                column
+                    .spawn((
+                        Node {
+                            width: Val::Percent(100.0),
+                            align_items: AlignItems::Center,
+                            column_gap: Val::Px(scaled(8.0, zoom)),
+                            ..default()
+                        },
+                        Pickable::IGNORE,
+                    ))
+                    .with_children(|row| {
+                        spawn_compact_node_action_button(
+                            row,
+                            "‹",
+                            NodeAction::PreviousModel(node_id),
+                            fonts,
+                            zoom,
+                        );
+                        row.spawn((
+                            Node {
+                                flex_grow: 1.0,
+                                min_height: Val::Px(scaled(34.0, zoom)),
+                                padding: UiRect::axes(
+                                    Val::Px(scaled(10.0, zoom)),
+                                    Val::Px(scaled(8.0, zoom)),
+                                ),
+                                border: UiRect::all(Val::Px(1.0)),
+                                border_radius: BorderRadius::all(Val::Px(scaled(8.0, zoom))),
+                                ..default()
+                            },
+                            BackgroundColor(Color::srgb_u8(18, 19, 22)),
+                            BorderColor::all(if is_value_editing {
+                                Color::srgb_u8(112, 144, 196)
+                            } else {
+                                Color::srgb_u8(56, 58, 64)
+                            }),
+                            Pickable::IGNORE,
+                        ))
+                        .with_child((
+                            Text::new(if model_text.trim().is_empty() {
+                                "(enter a model)"
+                            } else {
+                                model_text.as_str()
+                            }),
+                            NodeValueText { id: node_id },
+                            editor_text_font(fonts, scaled_font(13.0, zoom)),
+                            TextColor(Color::srgb_u8(244, 246, 248)),
+                            Pickable::IGNORE,
+                        ));
+                        spawn_compact_node_action_button(
+                            row,
+                            "›",
+                            NodeAction::NextModel(node_id),
+                            fonts,
+                            zoom,
+                        );
+                    });
+                column.spawn((
+                    Node {
+                        width: Val::Percent(100.0),
+                        ..default()
+                    },
+                    Text::new(model_hint),
+                    TextLayout::new_with_linebreak(LineBreak::WordOrCharacter),
+                    editor_text_font(fonts, scaled_font(11.0, zoom)),
+                    TextColor(Color::srgb_u8(162, 168, 178)),
+                    Pickable::IGNORE,
+                ));
+            });
+    });
 }
 
 fn spawn_editable_value_surface(

@@ -208,8 +208,7 @@ fn kickoff_initial_provider_refresh(
         .cloned()
         .collect::<Vec<_>>();
     if registrations.is_empty() {
-        runtime.last_status =
-            "No providers registered. Open the Providers panel to add one.".into();
+        runtime.last_status = "No providers registered. Add one from any Model node.".into();
         return;
     }
 
