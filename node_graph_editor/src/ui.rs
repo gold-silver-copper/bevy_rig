@@ -3263,7 +3263,9 @@ fn sync_node_views(
                         Pickable::IGNORE,
                     ))
                     .with_children(|body| {
-                        if is_numeric_node {
+                        if is_output_node {
+                            spawn_text_output_surface(body, &node_snapshot, &fonts, zoom);
+                        } else if is_numeric_node {
                             spawn_numeric_value_surface(
                                 body,
                                 node_id,
@@ -4384,6 +4386,59 @@ fn spawn_numeric_value_surface(
             fonts,
             zoom,
         );
+    });
+}
+
+fn spawn_text_output_surface(
+    body: &mut ChildSpawnerCommands,
+    node: &GraphNode,
+    fonts: &EditorFont,
+    zoom: f32,
+) {
+    let (status, text) = match &node.value {
+        NodeValue::TextOutput { text, status } => (status.as_str(), text.as_str()),
+        _ => return,
+    };
+
+    body.spawn((
+        Node {
+            width: Val::Percent(100.0),
+            flex_grow: 1.0,
+            min_height: Val::Px(0.0),
+            padding: UiRect::all(Val::Px(scaled(10.0, zoom))),
+            flex_direction: FlexDirection::Column,
+            justify_content: JustifyContent::FlexStart,
+            overflow: Overflow::clip(),
+            border_radius: BorderRadius::all(Val::Px(scaled(8.0, zoom))),
+            row_gap: Val::Px(scaled(10.0, zoom)),
+            ..default()
+        },
+        BackgroundColor(Color::BLACK),
+        Pickable::IGNORE,
+    ))
+    .with_children(|surface| {
+        surface.spawn((
+            Node {
+                width: Val::Percent(100.0),
+                ..default()
+            },
+            Text::new(format!("status = {status}")),
+            TextLayout::new_with_linebreak(LineBreak::WordOrCharacter),
+            editor_text_font(fonts, scaled_font(12.0, zoom)),
+            TextColor(Color::srgb_u8(170, 176, 186)),
+            Pickable::IGNORE,
+        ));
+        surface.spawn((
+            Node {
+                width: Val::Percent(100.0),
+                ..default()
+            },
+            Text::new(text),
+            TextLayout::new_with_linebreak(LineBreak::WordOrCharacter),
+            editor_text_font(fonts, scaled_font(13.0, zoom)),
+            TextColor(Color::srgb_u8(244, 246, 248)),
+            Pickable::IGNORE,
+        ));
     });
 }
 

@@ -1,11 +1,12 @@
 use std::{
     collections::BTreeMap,
-    env, fs,
+    fs,
     path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result};
 use bevy::prelude::*;
+use directories_next::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
 pub type ProviderId = String;
@@ -798,19 +799,9 @@ impl ProviderRegistryFile {
 }
 
 fn default_storage_path() -> PathBuf {
-    let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    if cwd.join("node_graph_editor/Cargo.toml").exists() {
-        cwd.join("node_graph_editor/.state/providers.json")
-    } else if cwd.join("Cargo.toml").exists()
-        && cwd
-            .file_name()
-            .and_then(|value| value.to_str())
-            .is_some_and(|value| value == "node_graph_editor")
-    {
-        cwd.join(".state/providers.json")
-    } else {
-        cwd.join(".node_graph_editor/providers.json")
-    }
+    ProjectDirs::from("", "", "bevy_rig")
+        .map(|dirs| dirs.config_dir().join("node_graph_editor/providers.json"))
+        .unwrap_or_else(|| std::env::temp_dir().join("bevy_rig/node_graph_editor/providers.json"))
 }
 
 fn require_api_key(value: &str) -> Option<String> {

@@ -637,34 +637,32 @@ impl GraphDocument {
     }
 
     pub fn set_output_result(&mut self, node_id: NodeId, text: String, status: String) {
-        if let Some(GraphNode {
-            value:
-                NodeValue::TextOutput {
-                    text: current_text,
-                    status: current_status,
-                },
-            ..
-        }) = self.node_mut(node_id)
-        {
-            *current_text = text;
-            *current_status = status;
-            self.touch();
+        if let Some(node) = self.node_mut(node_id) {
+            if let NodeValue::TextOutput {
+                text: current_text,
+                status: current_status,
+            } = &mut node.value
+            {
+                *current_text = text;
+                *current_status = status;
+                grow_node_to_fit_contents(node);
+                self.touch();
+            }
         }
     }
 
     pub fn clear_output(&mut self, node_id: NodeId) -> bool {
-        if let Some(GraphNode {
-            value: NodeValue::TextOutput { text, status },
-            ..
-        }) = self.node_mut(node_id)
-        {
-            *text = "Run the selected agent to populate this sink.".into();
-            *status = "idle".into();
-            self.touch();
-            true
-        } else {
-            false
+        if let Some(node) = self.node_mut(node_id) {
+            if let NodeValue::TextOutput { text, status } = &mut node.value {
+                *text = "Run the selected agent to populate this sink.".into();
+                *status = "idle".into();
+                grow_node_to_fit_contents(node);
+                self.touch();
+                return true;
+            }
         }
+
+        false
     }
 
     pub fn set_model_provider(&mut self, node_id: NodeId, provider_id: Option<String>) -> bool {
@@ -730,9 +728,16 @@ fn dynamic_body_height(node: &GraphNode) -> Option<f32> {
         | NodeValue::DynamicContext(text)
         | NodeValue::Hook(text)
         | NodeValue::OutputSchema(text) => text.as_str(),
+        NodeValue::TextOutput { text, status } => {
+            return dynamic_text_height(node, &format!("status = {status}\n\n{text}"));
+        }
         _ => return None,
     };
 
+    dynamic_text_height(node, text)
+}
+
+fn dynamic_text_height(node: &GraphNode, text: &str) -> Option<f32> {
     let (_, min_body_height) = default_node_body_dimensions(node.node_type);
     let content_width = (node.size.x.max(default_node_size(node.node_type).x) - 40.0).max(140.0);
     let chars_per_line = (content_width / 8.2).floor().max(12.0) as usize;
@@ -865,5 +870,23 @@ mod tests {
             }
             other => panic!("expected model node, found {other:?}"),
         }
+    }
+
+    #[test]
+    fn output_result_grows_text_output_node() {
+        let mut graph = GraphDocument::demo();
+        let output_node = graph
+            .first_node_id_by_type(NodeType::TextOutput)
+            .expect("demo graph should have a text output node");
+        let initial_height = graph.node(output_node).expect("output node").size.y;
+
+        graph.set_output_result(
+            output_node,
+            "This is a much longer response that should wrap across several lines inside the output surface without being truncated by the default preview renderer.".into(),
+            "completed via test provider / model".into(),
+        );
+
+        let grown_height = graph.node(output_node).expect("output node").size.y;
+        assert!(grown_height > initial_height);
     }
 }
