@@ -2,6 +2,7 @@ mod catalog;
 mod compile;
 mod document;
 mod graph;
+mod providers;
 mod runtime;
 mod session;
 mod ui;

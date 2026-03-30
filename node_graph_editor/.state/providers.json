@@ -1,0 +1,85 @@
+{
+  "next_id": 5,
+  "order": [
+    "provider-1",
+    "provider-2",
+    "provider-3",
+    "provider-4"
+  ],
+  "providers": [
+    {
+      "id": "provider-1",
+      "name": "OpenAI Provider",
+      "kind": "OpenAi",
+      "variant": {
+        "OpenAi": "ResponsesApi"
+      },
+      "config": {
+        "OpenAi": {
+          "api_key": "",
+          "base_url": null
+        }
+      },
+      "cached_models": [],
+      "status": {
+        "kind": "NeedsConfig",
+        "detail": "API key is required"
+      }
+    },
+    {
+      "id": "provider-2",
+      "name": "Local Ollama",
+      "kind": "Ollama",
+      "variant": "Standard",
+      "config": {
+        "Ollama": {
+          "base_url": "http://localhost:11434"
+        }
+      },
+      "cached_models": [
+        "qwen3:4b",
+        "llama3.2:latest"
+      ],
+      "status": {
+        "kind": "Ready",
+        "detail": "Local Ollama ready with 2 discovered model(s)"
+      }
+    },
+    {
+      "id": "provider-3",
+      "name": "Moonshot Provider",
+      "kind": "Moonshot",
+      "variant": "Standard",
+      "config": {
+        "Moonshot": {
+          "api_key": "",
+          "base_url": null
+        }
+      },
+      "cached_models": [],
+      "status": {
+        "kind": "NeedsConfig",
+        "detail": "API key is required"
+      }
+    },
+    {
+      "id": "provider-4",
+      "name": "Local Ollama",
+      "kind": "Ollama",
+      "variant": "Standard",
+      "config": {
+        "Ollama": {
+          "base_url": "http://localhost:11434"
+        }
+      },
+      "cached_models": [
+        "qwen3:4b",
+        "llama3.2:latest"
+      ],
+      "status": {
+        "kind": "Ready",
+        "detail": "Local Ollama ready with 2 discovered model(s)"
+      }
+    }
+  ]
+}

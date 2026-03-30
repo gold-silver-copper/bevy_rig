@@ -6,6 +6,7 @@ use crate::catalog::{
     NodeId, NodeSeed, NodeTemplate, NodeType, NodeValue, PortAddress, PortDirection, PortSpec,
     PortType, node_inputs, node_outputs, preview_line, preview_lines,
 };
+use crate::providers::ProviderRegistry;
 
 pub type EdgeId = u64;
 
@@ -49,13 +50,20 @@ impl GraphNode {
                 lines
             }
             NodeValue::Model {
-                provider_label,
+                provider_id,
                 model_name,
             } => vec![
-                format!("provider = {provider_label}"),
+                format!(
+                    "provider = {}",
+                    provider_id.as_deref().unwrap_or("(select provider)")
+                ),
                 format!(
                     "model = {}",
-                    model_name.as_deref().unwrap_or("(discovering locally)")
+                    if model_name.trim().is_empty() {
+                        "(enter a model)"
+                    } else {
+                        model_name
+                    }
                 ),
             ],
             NodeValue::Temperature(value) => vec![format!("value = {:.1}", value)],
@@ -552,13 +560,13 @@ impl GraphDocument {
                     if available_models.is_empty() {
                         return false;
                     }
-                    let current = model_name
-                        .as_ref()
-                        .and_then(|model| available_models.iter().position(|item| item == model))
+                    let current = available_models
+                        .iter()
+                        .position(|item| item == model_name)
                         .unwrap_or(0) as i32;
                     let len = available_models.len() as i32;
                     let next = (current + delta).rem_euclid(len) as usize;
-                    *model_name = Some(available_models[next].clone());
+                    *model_name = available_models[next].clone();
                     true
                 }
                 NodeValue::Temperature(value) => {
@@ -585,20 +593,39 @@ impl GraphDocument {
         changed
     }
 
-    pub fn apply_ollama_models(&mut self, models: &[String]) {
-        if models.is_empty() {
-            return;
-        }
-
+    pub fn apply_provider_registry(&mut self, providers: &ProviderRegistry) {
         let mut changed = false;
         for node in self.nodes.values_mut() {
-            if let NodeValue::Model { model_name, .. } = &mut node.value {
-                let needs_default = model_name
-                    .as_ref()
-                    .map(|value| !models.contains(value))
-                    .unwrap_or(true);
+            if let NodeValue::Model {
+                provider_id,
+                model_name,
+            } = &mut node.value
+            {
+                let resolved_provider_id = provider_id
+                    .as_deref()
+                    .filter(|id| providers.provider(id).is_some())
+                    .map(str::to_string)
+                    .or_else(|| providers.first_provider_id());
+
+                if *provider_id != resolved_provider_id {
+                    *provider_id = resolved_provider_id;
+                    changed = true;
+                }
+
+                let Some(provider_id) = provider_id.as_deref() else {
+                    continue;
+                };
+                let Some(provider) = providers.provider(provider_id) else {
+                    continue;
+                };
+                if provider.cached_models.is_empty() {
+                    continue;
+                }
+
+                let needs_default = model_name.trim().is_empty()
+                    || !provider.cached_models.iter().any(|item| item == model_name);
                 if needs_default {
-                    *model_name = Some(models[0].clone());
+                    *model_name = provider.cached_models[0].clone();
                     changed = true;
                 }
             }
@@ -638,6 +665,32 @@ impl GraphDocument {
         } else {
             false
         }
+    }
+
+    pub fn set_model_provider(&mut self, node_id: NodeId, provider_id: Option<String>) -> bool {
+        let changed = self
+            .node_mut(node_id)
+            .map(|node| match &mut node.value {
+                NodeValue::Model {
+                    provider_id: current,
+                    ..
+                } => {
+                    if *current == provider_id {
+                        false
+                    } else {
+                        *current = provider_id;
+                        true
+                    }
+                }
+                _ => false,
+            })
+            .unwrap_or(false);
+
+        if changed {
+            self.touch();
+        }
+
+        changed
     }
 }
 
@@ -719,6 +772,33 @@ fn node_chrome_height(node_type: NodeType) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::providers::{
+        EndpointProviderConfig, ProviderConfig, ProviderRegistry, ProviderStatus,
+    };
+
+    fn test_registry() -> ProviderRegistry {
+        let unique = format!(
+            "graph-doc-providers-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time should move forward")
+                .as_nanos()
+        );
+        let path = std::env::temp_dir().join(unique);
+        let mut registry = ProviderRegistry::load_or_seed(path);
+        let provider_id = registry.first_provider_id().expect("default provider");
+        let provider = registry
+            .provider_mut(&provider_id)
+            .expect("default provider should exist");
+        provider.status = ProviderStatus::ready("ready");
+        provider.cached_models = vec!["llama3.2:latest".into(), "qwen2.5:14b".into()];
+        provider.config = ProviderConfig::Ollama(EndpointProviderConfig {
+            base_url: "http://localhost:11434".into(),
+        });
+        registry.touch();
+        registry
+    }
 
     #[test]
     fn matching_value_types_connect() {
@@ -738,5 +818,52 @@ mod tests {
         assert!(graph.connect_ports(a, PortType::TextValue, agent, PortType::StaticContext));
         assert!(graph.connect_ports(b, PortType::TextValue, agent, PortType::StaticContext));
         assert_eq!(graph.input_sources(agent, PortType::StaticContext).len(), 2);
+    }
+
+    #[test]
+    fn apply_provider_registry_assigns_default_provider_and_model() {
+        let registry = test_registry();
+        let mut graph = GraphDocument::demo();
+        let model_node = graph
+            .first_node_id_by_type(NodeType::Model)
+            .expect("demo graph should have a model node");
+
+        graph.apply_provider_registry(&registry);
+
+        match &graph.node(model_node).expect("model node").value {
+            NodeValue::Model {
+                provider_id,
+                model_name,
+            } => {
+                assert_eq!(
+                    provider_id.as_deref(),
+                    registry.first_provider_id().as_deref()
+                );
+                assert_eq!(model_name, "llama3.2:latest");
+            }
+            other => panic!("expected model node, found {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apply_provider_registry_rebinds_missing_provider_ids() {
+        let registry = test_registry();
+        let mut graph = GraphDocument::demo();
+        let model_node = graph
+            .first_node_id_by_type(NodeType::Model)
+            .expect("demo graph should have a model node");
+
+        assert!(graph.set_model_provider(model_node, Some("missing-provider".into())));
+        graph.apply_provider_registry(&registry);
+
+        match &graph.node(model_node).expect("model node").value {
+            NodeValue::Model { provider_id, .. } => {
+                assert_eq!(
+                    provider_id.as_deref(),
+                    registry.first_provider_id().as_deref()
+                );
+            }
+            other => panic!("expected model node, found {other:?}"),
+        }
     }
 }

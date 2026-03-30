@@ -113,8 +113,8 @@ pub enum NodeValue {
         status: String,
     },
     Model {
-        provider_label: String,
-        model_name: Option<String>,
+        provider_id: Option<String>,
+        model_name: String,
     },
     Temperature(f64),
     U64(u64),
@@ -134,7 +134,10 @@ impl NodeValue {
             | Self::ToolServerHandle(text)
             | Self::DynamicContext(text)
             | Self::Hook(text)
-            | Self::OutputSchema(text) => Some(text.clone()),
+            | Self::OutputSchema(text)
+            | Self::Model {
+                model_name: text, ..
+            } => Some(text.clone()),
             Self::Temperature(value) => Some(format!("{value:.2}")),
             Self::U64(value) => Some(value.to_string()),
             _ => None,
@@ -148,7 +151,10 @@ impl NodeValue {
             | Self::ToolServerHandle(text)
             | Self::DynamicContext(text)
             | Self::Hook(text)
-            | Self::OutputSchema(text) => {
+            | Self::OutputSchema(text)
+            | Self::Model {
+                model_name: text, ..
+            } => {
                 *text = value.to_string();
                 true
             }
@@ -248,8 +254,8 @@ impl NodeTemplate {
                 node_type: NodeType::Model,
                 title: "Model".into(),
                 value: NodeValue::Model {
-                    provider_label: "Ollama".into(),
-                    model_name: None,
+                    provider_id: None,
+                    model_name: String::new(),
                 },
             },
             Self::Temperature => NodeSeed {

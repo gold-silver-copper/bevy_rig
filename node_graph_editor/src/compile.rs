@@ -5,12 +5,13 @@ use serde_json::Value;
 use crate::{
     catalog::{NodeId, NodeType, NodeValue, PortType, ToolChoiceSetting},
     document::GraphDocument,
-    runtime::{CompiledAgentRun, RigEditorRuntime},
+    providers::ProviderRegistry,
+    runtime::CompiledAgentRun,
 };
 
 pub fn compile_agent_run(
     document: &GraphDocument,
-    runtime: &RigEditorRuntime,
+    providers: &ProviderRegistry,
     agent_id: NodeId,
 ) -> Result<CompiledAgentRun> {
     let output_node = document
@@ -25,12 +26,39 @@ pub fn compile_agent_run(
         .ok_or_else(|| anyhow!("connect the Agent output to a Text Output node"))?;
 
     let model_node = required_source(document, agent_id, PortType::Model, "model")?;
-    let model = match document.node(model_node).map(|node| &node.value) {
-        Some(NodeValue::Model { model_name, .. }) => model_name
-            .clone()
-            .ok_or_else(|| anyhow!("select a local Ollama model inside the Model node"))?,
+    let (provider_id, model) = match document.node(model_node).map(|node| &node.value) {
+        Some(NodeValue::Model {
+            provider_id,
+            model_name,
+        }) => {
+            let provider_id = provider_id
+                .clone()
+                .ok_or_else(|| anyhow!("select a provider inside the Model node"))?;
+            let model = model_name.trim();
+            if model.is_empty() {
+                return Err(anyhow!("enter or select a model inside the Model node"));
+            }
+            (provider_id, model.to_string())
+        }
         _ => return Err(anyhow!("the Agent model input must come from a Model node")),
     };
+    let provider = providers
+        .provider(&provider_id)
+        .cloned()
+        .ok_or_else(|| anyhow!("selected provider registration no longer exists"))?;
+    if let Some(error) = provider.config_error() {
+        return Err(anyhow!(
+            "{} is not configured: {error}",
+            provider.display_name()
+        ));
+    }
+    if !provider.status.kind.is_ready() {
+        return Err(anyhow!(
+            "{} is not ready: {}",
+            provider.display_name(),
+            provider.status.detail
+        ));
+    }
 
     let prompt_node = required_source(document, agent_id, PortType::Prompt, "prompt")?;
     let prompt = match document.node(prompt_node).map(|node| &node.value) {
@@ -66,21 +94,10 @@ pub fn compile_agent_run(
     if !document.input_sources(agent_id, PortType::Hook).is_empty() {
         warnings.push("hook nodes are stored but not executable in this MVP".into());
     }
-    if tool_choice.is_some() {
-        warnings
-            .push("Ollama currently ignores tool_choice; it will be dropped for this run".into());
-    }
-    if !runtime.ollama_ready {
-        return Err(anyhow!(
-            "local Ollama is not reachable at {}",
-            runtime.ollama_endpoint
-        ));
-    }
-
     Ok(CompiledAgentRun {
         agent_id,
         output_node,
-        endpoint: runtime.ollama_endpoint.clone(),
+        provider,
         model,
         prompt,
         agent_name,
@@ -270,5 +287,109 @@ fn optional_schema_source(document: &GraphDocument, agent_id: NodeId) -> Result<
         _ => Err(anyhow!(
             "output_schema input must come from an Output Schema node"
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::providers::{
+        ApiKeyProviderConfig, OpenAiVariant, ProviderConfig, ProviderKind, ProviderRegistry,
+        ProviderStatus, ProviderVariant,
+    };
+
+    fn test_registry() -> ProviderRegistry {
+        let unique = format!(
+            "compile-providers-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time should move forward")
+                .as_nanos()
+        );
+        let path = std::env::temp_dir().join(unique);
+        let mut registry = ProviderRegistry::load_or_seed(path);
+        let provider_id = registry.first_provider_id().expect("default provider");
+        let provider = registry
+            .provider_mut(&provider_id)
+            .expect("default provider should exist");
+        provider.status = ProviderStatus::ready("ready");
+        provider.cached_models = vec!["llama3.2:latest".into()];
+        registry.touch();
+        registry
+    }
+
+    #[test]
+    fn compile_rejects_missing_provider_selection() {
+        let registry = test_registry();
+        let mut graph = GraphDocument::demo();
+        let model_node = graph
+            .first_node_id_by_type(NodeType::Model)
+            .expect("demo graph should have a model node");
+        let agent_id = graph
+            .first_node_id_by_type(NodeType::Agent)
+            .expect("demo graph should have an agent");
+        graph.set_model_provider(model_node, None);
+
+        let error =
+            compile_agent_run(&graph, &registry, agent_id).expect_err("compile should fail");
+        assert!(error.to_string().contains("select a provider"));
+    }
+
+    #[test]
+    fn compile_rejects_unready_provider() {
+        let mut registry = test_registry();
+        let provider_id = registry.first_provider_id().expect("default provider");
+        let provider = registry
+            .provider_mut(&provider_id)
+            .expect("default provider should exist");
+        provider.status = ProviderStatus::error("endpoint unavailable");
+        registry.touch();
+
+        let mut graph = GraphDocument::demo();
+        graph.apply_provider_registry(&registry);
+        let agent_id = graph
+            .first_node_id_by_type(NodeType::Agent)
+            .expect("demo graph should have an agent");
+
+        let error =
+            compile_agent_run(&graph, &registry, agent_id).expect_err("compile should fail");
+        assert!(error.to_string().contains("not ready"));
+    }
+
+    #[test]
+    fn compile_captures_provider_variant() {
+        let mut registry = test_registry();
+        let openai_id = registry.add_provider(ProviderKind::OpenAi);
+        let provider = registry
+            .provider_mut(&openai_id)
+            .expect("new provider should exist");
+        provider.variant = ProviderVariant::OpenAi(OpenAiVariant::CompletionsApi);
+        provider.config = ProviderConfig::OpenAi(ApiKeyProviderConfig {
+            api_key: "test-key".into(),
+            base_url: None,
+        });
+        provider.status = ProviderStatus::ready("ready");
+        provider.cached_models = vec!["gpt-4o-mini".into()];
+        registry.touch();
+
+        let mut graph = GraphDocument::demo();
+        graph.apply_provider_registry(&registry);
+        let model_node = graph
+            .first_node_id_by_type(NodeType::Model)
+            .expect("demo graph should have a model node");
+        let agent_id = graph
+            .first_node_id_by_type(NodeType::Agent)
+            .expect("demo graph should have an agent");
+        graph.set_model_provider(model_node, Some(openai_id.clone()));
+        graph.set_node_inline_value_live(model_node, "gpt-4o-mini");
+
+        let compiled =
+            compile_agent_run(&graph, &registry, agent_id).expect("compile should succeed");
+        assert_eq!(compiled.provider.id, openai_id);
+        assert_eq!(
+            compiled.provider.variant,
+            ProviderVariant::OpenAi(OpenAiVariant::CompletionsApi)
+        );
     }
 }
