@@ -2,12 +2,14 @@ mod catalog;
 mod compile;
 mod document;
 mod graph;
+mod physics;
 mod providers;
 mod runtime;
 mod session;
 mod ui;
 
 use bevy::prelude::*;
+use physics::NodePhysicsPlugin;
 use runtime::NodeGraphRuntimePlugin;
 use ui::NodeGraphEditorPlugin;
 
@@ -36,6 +38,10 @@ fn main() {
                     ..default()
                 }),
         )
-        .add_plugins((NodeGraphRuntimePlugin, NodeGraphEditorPlugin))
+        .add_plugins((
+            NodeGraphRuntimePlugin,
+            NodeGraphEditorPlugin,
+            NodePhysicsPlugin,
+        ))
         .run();
 }

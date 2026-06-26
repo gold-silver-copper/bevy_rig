@@ -5,6 +5,7 @@ use bevy::{
     ecs::{hierarchy::ChildSpawnerCommands, system::ParamSet},
     input::{
         ButtonState,
+        gestures::PinchGesture,
         keyboard::{KeyCode, KeyboardInput},
         mouse::{MouseScrollUnit, MouseWheel},
     },
@@ -52,6 +53,21 @@ const WIRE_MAX_SEGMENTS: usize = 22;
 const GRID_SPACING: f32 = 28.0;
 const PALETTE_WIDTH: f32 = 248.0;
 
+// Zoom limits, shared by wheel zoom and pinch zoom.
+const ZOOM_MIN: f32 = 0.4;
+const ZOOM_MAX: f32 = 2.5;
+// Two-finger-scroll panning sensitivity. Flip the sign of an axis if its
+// direction feels inverted on your trackpad (this depends on the macOS
+// "natural scrolling" preference).
+const PAN_SCROLL_SPEED_X: f32 = 1.0;
+const PAN_SCROLL_SPEED_Y: f32 = 1.0;
+// A classic mouse wheel reports discrete "lines" rather than pixels; scale
+// those up so wheel panning moves a sensible amount per notch.
+const PAN_SCROLL_LINE_PIXELS: f32 = 24.0;
+// Pinch magnification sensitivity. `PinchGesture` reports a fractional change
+// in magnification, so 1.0 maps it straight through.
+const PINCH_ZOOM_SENSITIVITY: f32 = 1.0;
+
 pub struct NodeGraphEditorPlugin;
 
 impl Plugin for NodeGraphEditorPlugin {
@@ -74,7 +90,8 @@ impl Plugin for NodeGraphEditorPlugin {
                     handle_provider_edit_input,
                     handle_node_buttons,
                     handle_text_edit_input,
-                    handle_canvas_zoom,
+                    handle_canvas_scroll,
+                    handle_pinch_zoom,
                     handle_hover_hints,
                     sync_node_views,
                     sync_palette_view,
@@ -644,7 +661,13 @@ fn setup_editor_ui(
         )
         .observe(
             |mut drag: On<Pointer<Drag>>, mut session: ResMut<EditorSession>| {
-                if drag.button == PointerButton::Middle {
+                // Middle-drag pans for a mouse; primary-drag on the empty canvas
+                // pans for a trackpad (which has no middle button). A primary
+                // drag that is actually drawing a wire is ignored here.
+                let pan_drag = drag.button == PointerButton::Middle
+                    || (drag.button == PointerButton::Primary
+                        && session.dragging_wire.is_none());
+                if pan_drag {
                     drag.propagate(false);
                     session.pan += drag.delta;
                     session.touch();
@@ -690,8 +713,8 @@ fn setup_editor_ui(
 
 fn editor_text_font(fonts: &EditorFont, size: f32) -> TextFont {
     TextFont {
-        font: fonts.0.clone(),
-        font_size: size,
+        font: fonts.0.clone().into(),
+        font_size: size.into(),
         ..default()
     }
 }
@@ -1462,7 +1485,10 @@ fn handle_text_edit_input(
     }
 }
 
-fn handle_canvas_zoom(
+// Two-finger scroll on a trackpad arrives as `MouseWheel` events. Without a
+// modifier it pans the canvas; with Cmd/Ctrl held it zooms (handy for a mouse
+// wheel). Pinch-to-zoom is handled separately in `handle_pinch_zoom`.
+fn handle_canvas_scroll(
     mut wheel_events: MessageReader<MouseWheel>,
     keys: Res<ButtonInput<KeyCode>>,
     mut session: ResMut<EditorSession>,
@@ -1472,33 +1498,80 @@ fn handle_canvas_zoom(
     >,
     windows: Query<&Window, With<PrimaryWindow>>,
 ) {
-    let modifier_pressed = keys.any_pressed([
+    // Only react while the pointer is over the canvas, so scrolling over side
+    // panels keeps scrolling those instead of moving the canvas.
+    let Some(pointer_screen) = current_canvas_cursor_local_position(&windows, &canvas_query) else {
+        return;
+    };
+
+    let zoom_modifier = keys.any_pressed([
         KeyCode::SuperLeft,
         KeyCode::SuperRight,
         KeyCode::ControlLeft,
         KeyCode::ControlRight,
     ]);
-    if !modifier_pressed {
+
+    let mut zoom_scroll = 0.0;
+    let mut pan_delta = Vec2::ZERO;
+    for event in wheel_events.read() {
+        let (pan_scale, zoom_scale) = match event.unit {
+            MouseScrollUnit::Line => (PAN_SCROLL_LINE_PIXELS, 1.0),
+            MouseScrollUnit::Pixel => (1.0, 0.05),
+        };
+        zoom_scroll += event.y * zoom_scale;
+        pan_delta += Vec2::new(event.x, event.y) * pan_scale;
+    }
+
+    if zoom_modifier {
+        if zoom_scroll.abs() >= f32::EPSILON {
+            apply_zoom_at_cursor(&mut session, pointer_screen, 1.1_f32.powf(zoom_scroll));
+        }
+    } else if pan_delta != Vec2::ZERO {
+        session.pan += Vec2::new(
+            pan_delta.x * PAN_SCROLL_SPEED_X,
+            pan_delta.y * PAN_SCROLL_SPEED_Y,
+        );
+        session.touch();
+    }
+}
+
+// Trackpad pinch (macOS) zooms toward the pointer, falling back to the canvas
+// center when the pointer isn't over the canvas.
+fn handle_pinch_zoom(
+    mut pinch_events: MessageReader<PinchGesture>,
+    mut session: ResMut<EditorSession>,
+    canvas_query: Query<
+        (&ComputedNode, &UiGlobalTransform, &RelativeCursorPosition),
+        With<CanvasSurface>,
+    >,
+    windows: Query<&Window, With<PrimaryWindow>>,
+) {
+    let mut magnify = 0.0;
+    for event in pinch_events.read() {
+        magnify += event.0;
+    }
+    if magnify.abs() < f32::EPSILON {
         return;
     }
 
-    let Some(pointer_screen) = current_canvas_cursor_local_position(&windows, &canvas_query) else {
+    let pointer_screen = current_canvas_cursor_local_position(&windows, &canvas_query)
+        .or_else(|| canvas_query.single().ok().map(|(node, _, _)| node.size() * 0.5));
+    let Some(pointer_screen) = pointer_screen else {
         return;
     };
 
-    let mut scroll_delta = 0.0;
-    for event in wheel_events.read() {
-        scroll_delta += match event.unit {
-            MouseScrollUnit::Line => event.y,
-            MouseScrollUnit::Pixel => event.y * 0.05,
-        };
-    }
-    if scroll_delta.abs() < f32::EPSILON {
-        return;
-    }
+    apply_zoom_at_cursor(
+        &mut session,
+        pointer_screen,
+        1.0 + magnify * PINCH_ZOOM_SENSITIVITY,
+    );
+}
 
+// Scale `session.zoom` by `zoom_factor` while keeping the world point under
+// `pointer_screen` fixed on screen.
+fn apply_zoom_at_cursor(session: &mut EditorSession, pointer_screen: Vec2, zoom_factor: f32) {
     let old_zoom = session.zoom.max(0.001);
-    let new_zoom = (old_zoom * 1.1_f32.powf(scroll_delta)).clamp(0.4, 2.5);
+    let new_zoom = (old_zoom * zoom_factor).clamp(ZOOM_MIN, ZOOM_MAX);
     if (new_zoom - old_zoom).abs() < f32::EPSILON {
         return;
     }
@@ -1881,6 +1954,12 @@ fn provider_field_display(
     if provider_editing.editing.as_ref().is_some_and(|target| {
         target.node_id == node_id && target.provider_id == provider.id && target.field == field
     }) {
+        // Mask secret fields (API keys, credentials) while they are being typed
+        // so the key is never shown in plaintext, while still showing the cursor
+        // and how many characters have been entered.
+        if provider_field_is_secret(provider, field) {
+            return editing_text_with_cursor(&mask_input(&provider_editing.buffer));
+        }
         return editing_text_with_cursor(&provider_editing.buffer);
     }
 
@@ -1975,6 +2054,12 @@ fn mask_secret(value: &str) -> String {
         return "********".into();
     }
     format!("{}…{}", &trimmed[..4], &trimmed[trimmed.len() - 4..])
+}
+
+// Replace each character of a secret being typed with an asterisk, preserving
+// the character count so the field still reflects typing progress.
+fn mask_input(value: &str) -> String {
+    "*".repeat(value.chars().count())
 }
 
 fn replace_string(slot: &mut String, next: String) -> bool {
@@ -3987,7 +4072,7 @@ fn spawn_model_node_surface(
                 ..default()
             },
             Text::new("Shared provider registration. Edits here affect every Model node using it."),
-            TextLayout::new_with_linebreak(LineBreak::WordOrCharacter),
+            TextLayout::linebreak(LineBreak::WordOrCharacter),
             editor_text_font(fonts, scaled_font(11.0, zoom)),
             TextColor(Color::srgb_u8(162, 168, 178)),
             Pickable::IGNORE,
@@ -4041,7 +4126,7 @@ fn spawn_model_node_surface(
                                 .map(|provider| provider.display_name().to_string())
                                 .unwrap_or_else(|| "No shared provider registered".into()),
                         ),
-                        TextLayout::new_with_linebreak(LineBreak::WordOrCharacter),
+                        TextLayout::linebreak(LineBreak::WordOrCharacter),
                         editor_text_font(fonts, scaled_font(13.0, zoom)),
                         TextColor(Color::srgb_u8(236, 238, 241)),
                         Pickable::IGNORE,
@@ -4301,7 +4386,7 @@ fn spawn_model_node_surface(
                         ..default()
                     },
                     Text::new(format!("Suggestions: {cache_preview}")),
-                    TextLayout::new_with_linebreak(LineBreak::WordOrCharacter),
+                    TextLayout::linebreak(LineBreak::WordOrCharacter),
                     editor_text_font(fonts, scaled_font(11.0, zoom)),
                     TextColor(Color::srgb_u8(164, 170, 180)),
                     Pickable::IGNORE,
@@ -4313,7 +4398,7 @@ fn spawn_model_node_surface(
                     ..default()
                 },
                 Text::new(provider.status.detail.clone()),
-                TextLayout::new_with_linebreak(LineBreak::WordOrCharacter),
+                TextLayout::linebreak(LineBreak::WordOrCharacter),
                 editor_text_font(fonts, scaled_font(11.0, zoom)),
                 TextColor(Color::srgb_u8(214, 218, 224)),
                 Pickable::IGNORE,
@@ -4409,7 +4494,7 @@ fn spawn_model_node_surface(
                         ..default()
                     },
                     Text::new(model_hint),
-                    TextLayout::new_with_linebreak(LineBreak::WordOrCharacter),
+                    TextLayout::linebreak(LineBreak::WordOrCharacter),
                     editor_text_font(fonts, scaled_font(11.0, zoom)),
                     TextColor(Color::srgb_u8(162, 168, 178)),
                     Pickable::IGNORE,
@@ -4451,7 +4536,7 @@ fn spawn_editable_value_surface(
             },
             Text::new(text),
             NodeValueText { id: node_id },
-            TextLayout::new_with_linebreak(LineBreak::WordOrCharacter),
+            TextLayout::linebreak(LineBreak::WordOrCharacter),
             editor_text_font(fonts, scaled_font(13.0, zoom)),
             TextColor(Color::srgb_u8(244, 246, 248)),
             Pickable::IGNORE,
@@ -4555,7 +4640,7 @@ fn spawn_text_output_surface(
                 ..default()
             },
             Text::new(format!("status = {status}")),
-            TextLayout::new_with_linebreak(LineBreak::WordOrCharacter),
+            TextLayout::linebreak(LineBreak::WordOrCharacter),
             editor_text_font(fonts, scaled_font(12.0, zoom)),
             TextColor(Color::srgb_u8(170, 176, 186)),
             Pickable::IGNORE,
@@ -4566,7 +4651,7 @@ fn spawn_text_output_surface(
                 ..default()
             },
             Text::new(text),
-            TextLayout::new_with_linebreak(LineBreak::WordOrCharacter),
+            TextLayout::linebreak(LineBreak::WordOrCharacter),
             editor_text_font(fonts, scaled_font(13.0, zoom)),
             TextColor(Color::srgb_u8(244, 246, 248)),
             Pickable::IGNORE,

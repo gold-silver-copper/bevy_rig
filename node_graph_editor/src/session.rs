@@ -21,8 +21,8 @@ pub struct EditorSession {
 impl Default for EditorSession {
     fn default() -> Self {
         Self {
-            pan: Vec2::new(360.0, 120.0),
-            zoom: 1.0,
+            pan: Vec2::new(60.0, 100.0),
+            zoom: 0.55,
             selected_node: None,
             hovered_port: None,
             dragging_wire: None,

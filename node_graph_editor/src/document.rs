@@ -117,26 +117,29 @@ impl GraphDocument {
             next_edge_id: 1,
         };
 
-        let agent = graph.add_node(NodeTemplate::Agent.instantiate(), Vec2::new(760.0, 220.0));
-        let output = graph.add_node(
-            NodeTemplate::TextOutput.instantiate(),
-            Vec2::new(1210.0, 260.0),
-        );
-        let prompt = graph.add_node(NodeTemplate::String.instantiate(), Vec2::new(260.0, 140.0));
-        let model = graph.add_node(NodeTemplate::Model.instantiate(), Vec2::new(260.0, 350.0));
-        let name = graph.add_node(NodeTemplate::String.instantiate(), Vec2::new(260.0, 20.0));
+        // Spread across roomy, non-overlapping columns: text inputs on the
+        // far left, model/params in the middle-left, the agent in the centre,
+        // and its output on the right. Soft physics keeps them apart from here.
+        let preamble = graph.add_node(NodeTemplate::String.instantiate(), Vec2::new(0.0, 160.0));
+        let context = graph.add_node(NodeTemplate::String.instantiate(), Vec2::new(0.0, 620.0));
+        let name = graph.add_node(NodeTemplate::String.instantiate(), Vec2::new(560.0, 0.0));
+        let prompt = graph.add_node(NodeTemplate::String.instantiate(), Vec2::new(560.0, 360.0));
         let description =
-            graph.add_node(NodeTemplate::String.instantiate(), Vec2::new(260.0, 560.0));
-        let preamble = graph.add_node(NodeTemplate::String.instantiate(), Vec2::new(20.0, 140.0));
-        let context = graph.add_node(NodeTemplate::String.instantiate(), Vec2::new(20.0, 380.0));
+            graph.add_node(NodeTemplate::String.instantiate(), Vec2::new(560.0, 720.0));
+        let model = graph.add_node(NodeTemplate::Model.instantiate(), Vec2::new(1140.0, 0.0));
         let temperature = graph.add_node(
             NodeTemplate::Temperature.instantiate(),
-            Vec2::new(520.0, 20.0),
+            Vec2::new(1140.0, 560.0),
         );
-        let max_tokens = graph.add_node(NodeTemplate::U64.instantiate(), Vec2::new(520.0, 560.0));
+        let max_tokens = graph.add_node(NodeTemplate::U64.instantiate(), Vec2::new(1140.0, 800.0));
         let additional_params = graph.add_node(
             NodeTemplate::AdditionalParams.instantiate(),
-            Vec2::new(520.0, 700.0),
+            Vec2::new(1140.0, 1040.0),
+        );
+        let agent = graph.add_node(NodeTemplate::Agent.instantiate(), Vec2::new(1760.0, 300.0));
+        let output = graph.add_node(
+            NodeTemplate::TextOutput.instantiate(),
+            Vec2::new(2360.0, 420.0),
         );
 
         graph.configure_text_node(name, "Name", "Hall Greeter");
