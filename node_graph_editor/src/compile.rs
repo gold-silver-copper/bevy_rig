@@ -3,7 +3,7 @@ use schemars::Schema;
 use serde_json::Value;
 
 use crate::{
-    catalog::{NodeId, NodeType, NodeValue, PortType, ToolChoiceSetting},
+    catalog::{ConversationTurn, NodeId, NodeType, NodeValue, PortType, ToolChoiceSetting},
     document::GraphDocument,
     providers::ProviderRegistry,
     runtime::CompiledAgentRun,
@@ -24,6 +24,13 @@ pub fn compile_agent_run(
             )
         })
         .ok_or_else(|| anyhow!("connect the Agent output to a Text Output node"))?;
+
+    // Prior conversation accumulated in the connected Text Output node. This is
+    // sent back to the model (after windowing) so follow-up prompts have context.
+    let history: Vec<ConversationTurn> = match document.node(output_node).map(|node| &node.value) {
+        Some(NodeValue::TextOutput { transcript, .. }) => transcript.clone(),
+        _ => Vec::new(),
+    };
 
     let model_node = required_source(document, agent_id, PortType::Model, "model")?;
     let (provider_id, model) = match document.node(model_node).map(|node| &node.value) {
@@ -100,6 +107,7 @@ pub fn compile_agent_run(
         provider,
         model,
         prompt,
+        history,
         agent_name,
         description,
         preamble,
@@ -416,5 +424,56 @@ mod tests {
             compiled.provider.variant,
             ProviderVariant::OpenAi(OpenAiVariant::CompletionsApi)
         );
+    }
+
+    #[test]
+    fn compile_includes_prior_transcript_as_history() {
+        use crate::catalog::ChatRole;
+
+        let mut registry = test_registry();
+        let openai_id = registry.add_provider(ProviderKind::OpenAi);
+        let provider = registry
+            .provider_mut(&openai_id)
+            .expect("new provider should exist");
+        provider.config = ProviderConfig::OpenAi(ApiKeyProviderConfig {
+            api_key: "test-key".into(),
+            base_url: None,
+        });
+        provider.status = ProviderStatus::ready("ready");
+        provider.cached_models = vec!["gpt-4o-mini".into()];
+        registry.touch();
+
+        let mut graph = GraphDocument::demo();
+        graph.apply_provider_registry(&registry);
+        let model_node = graph
+            .first_node_id_by_type(NodeType::Model)
+            .expect("demo graph should have a model node");
+        let agent_id = graph
+            .first_node_id_by_type(NodeType::Agent)
+            .expect("demo graph should have an agent");
+        let output_node = graph
+            .first_node_id_by_type(NodeType::TextOutput)
+            .expect("demo graph should have a text output");
+        graph.set_model_provider(model_node, Some(openai_id.clone()));
+        graph.set_node_inline_value_live(model_node, "gpt-4o-mini");
+
+        // Prior conversation accumulated on the output node should be compiled
+        // into the run as history.
+        graph.append_output_turns(
+            output_node,
+            vec![
+                ConversationTurn::user("earlier question"),
+                ConversationTurn::assistant("earlier answer"),
+            ],
+            "completed",
+        );
+
+        let compiled =
+            compile_agent_run(&graph, &registry, agent_id).expect("compile should succeed");
+        assert_eq!(compiled.history.len(), 2);
+        assert_eq!(compiled.history[0].role, ChatRole::User);
+        assert_eq!(compiled.history[0].text, "earlier question");
+        assert_eq!(compiled.history[1].role, ChatRole::Assistant);
+        assert_eq!(compiled.history[1].text, "earlier answer");
     }
 }

@@ -9,7 +9,7 @@ use rig::{
         Client as RigClient, DebugExt as RigDebugExt, Nothing, Provider as RigProvider,
         VerifyClient,
     },
-    completion::{CompletionModel as RigCompletionModel, Prompt},
+    completion::{CompletionModel as RigCompletionModel, Message as RigMessage, Prompt},
     http_client::{self as rig_http, HttpClientExt as RigHttpClientExt, NoBody},
     message::ToolChoice as RigToolChoice,
     prelude::CompletionClient,
@@ -19,13 +19,14 @@ use rig::{
     },
     wasm_compat::WasmCompatSync,
 };
+use rig_memory::{MemoryPolicy, SlidingWindowMemory};
 use schemars::Schema;
 use serde::Deserialize;
 use serde_json::Value;
 use tokio::{runtime::Runtime, task::JoinHandle};
 
 use crate::{
-    catalog::{NodeId, ToolChoiceSetting},
+    catalog::{ChatRole, ConversationTurn, NodeId, ToolChoiceSetting},
     document::GraphDocument,
     providers::{
         ApiKeyProviderConfig, AzureAuthKind, AzureProviderConfig, EndpointProviderConfig,
@@ -34,6 +35,10 @@ use crate::{
         ProviderRegistration, ProviderRegistry, ProviderStatus, ProviderVariant,
     },
 };
+
+/// Most recent conversation turns sent back to the model on each run. The full
+/// transcript is always kept in the graph; this only bounds what the model sees.
+const HISTORY_WINDOW: usize = 20;
 
 pub struct NodeGraphRuntimePlugin;
 
@@ -160,6 +165,9 @@ pub struct CompiledAgentRun {
     pub provider: ProviderRegistration,
     pub model: String,
     pub prompt: String,
+    /// Prior conversation turns (full transcript) read from the output node.
+    /// Windowed before being sent to the model.
+    pub history: Vec<ConversationTurn>,
     pub agent_name: Option<String>,
     pub description: Option<String>,
     pub preamble: Option<String>,
@@ -182,7 +190,7 @@ enum RuntimeMessage {
     RunComplete {
         request_id: u64,
         output_node: NodeId,
-        text: String,
+        turns: Vec<ConversationTurn>,
         status: String,
     },
     RunFailed {
@@ -246,14 +254,14 @@ fn poll_runtime_messages(
             RuntimeMessage::RunComplete {
                 request_id,
                 output_node,
-                text,
+                turns,
                 status,
             } => {
                 runtime.pending_request = None;
                 runtime.pending_output_node = None;
                 runtime.pending_task = None;
                 runtime.last_status = format!("Run #{request_id} finished.");
-                document.set_output_result(output_node, text, status);
+                document.append_output_turns(output_node, turns, status);
             }
             RuntimeMessage::RunFailed {
                 request_id,
@@ -265,7 +273,9 @@ fn poll_runtime_messages(
                 runtime.pending_task = None;
                 runtime.last_status = format!("Run #{request_id} failed: {error}");
                 if let Some(output_node) = output_node {
-                    document.set_output_result(output_node, error.clone(), "failed".into());
+                    // Don't pollute the transcript with the failure; just surface it
+                    // on the status line, leaving prior turns intact.
+                    document.set_output_status(output_node, format!("failed: {error}"));
                 }
             }
         }
@@ -454,8 +464,12 @@ where
 
     let provider_label = request.provider.display_name().to_string();
     let agent = builder.build();
+
+    // Send the prior transcript (windowed) so the model has conversation context.
+    let windowed_history = window_history(&request.history)?;
     let response = agent
         .prompt(request.prompt.as_str())
+        .history(windowed_history)
         .await
         .map_err(|error| anyhow!(error.to_string()))?;
 
@@ -473,12 +487,34 @@ where
         )
     };
 
+    // Accumulate this exchange onto the transcript.
+    let turns = vec![
+        ConversationTurn::user(request.prompt),
+        ConversationTurn::assistant(response),
+    ];
+
     Ok(RuntimeMessage::RunComplete {
         request_id,
         output_node: request.output_node,
-        text: response,
+        turns,
         status,
     })
+}
+
+/// Convert stored turns to rig messages and trim to the most recent window so
+/// long conversations don't blow the model's context budget.
+fn window_history(history: &[ConversationTurn]) -> Result<Vec<RigMessage>> {
+    let messages: Vec<RigMessage> = history
+        .iter()
+        .map(|turn| match turn.role {
+            ChatRole::User => RigMessage::user(turn.text.clone()),
+            ChatRole::Assistant => RigMessage::assistant(turn.text.clone()),
+        })
+        .collect();
+
+    SlidingWindowMemory::last_messages(HISTORY_WINDOW)
+        .apply(messages)
+        .map_err(|error| anyhow!(error.to_string()))
 }
 
 async fn refresh_provider(provider: ProviderRegistration) -> ProviderRefreshResult {

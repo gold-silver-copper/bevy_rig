@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use bevy::prelude::*;
 
 use crate::catalog::{
-    NodeId, NodeSeed, NodeTemplate, NodeType, NodeValue, PortAddress, PortDirection, PortSpec,
-    PortType, node_inputs, node_outputs, preview_line, preview_lines,
+    ConversationTurn, NodeId, NodeSeed, NodeTemplate, NodeType, NodeValue, PortAddress,
+    PortDirection, PortSpec, PortType, node_inputs, node_outputs, preview_line, preview_lines,
 };
 use crate::providers::ProviderRegistry;
 
@@ -44,9 +44,9 @@ impl GraphNode {
                 "Requires: model + prompt + text output.".into(),
             ],
             NodeValue::Text(text) => preview_lines(text, "text"),
-            NodeValue::TextOutput { text, status } => {
+            NodeValue::TextOutput { transcript, status } => {
                 let mut lines = vec![format!("status = {status}")];
-                lines.extend(preview_lines(text, "output"));
+                lines.extend(preview_lines(&transcript_display_text(transcript), "output"));
                 lines
             }
             NodeValue::Model {
@@ -645,15 +645,38 @@ impl GraphDocument {
         }
     }
 
-    pub fn set_output_result(&mut self, node_id: NodeId, text: String, status: String) {
+    /// Update only the status line of a Text Output node, leaving its
+    /// accumulated transcript intact (used for "Running…", "stopped", "failed").
+    pub fn set_output_status(&mut self, node_id: NodeId, status: impl Into<String>) {
         if let Some(node) = self.node_mut(node_id) {
             if let NodeValue::TextOutput {
-                text: current_text,
+                status: current_status,
+                ..
+            } = &mut node.value
+            {
+                *current_status = status.into();
+                self.touch();
+            }
+        }
+    }
+
+    /// Append conversation turns to a Text Output node's transcript and update
+    /// its status. This is how a completed run accumulates history instead of
+    /// overwriting the previous output.
+    pub fn append_output_turns(
+        &mut self,
+        node_id: NodeId,
+        turns: Vec<ConversationTurn>,
+        status: impl Into<String>,
+    ) {
+        if let Some(node) = self.node_mut(node_id) {
+            if let NodeValue::TextOutput {
+                transcript,
                 status: current_status,
             } = &mut node.value
             {
-                *current_text = text;
-                *current_status = status;
+                transcript.extend(turns);
+                *current_status = status.into();
                 grow_node_to_fit_contents(node);
                 self.touch();
             }
@@ -662,8 +685,8 @@ impl GraphDocument {
 
     pub fn clear_output(&mut self, node_id: NodeId) -> bool {
         if let Some(node) = self.node_mut(node_id) {
-            if let NodeValue::TextOutput { text, status } = &mut node.value {
-                *text = "Run the selected agent to populate this sink.".into();
+            if let NodeValue::TextOutput { transcript, status } = &mut node.value {
+                transcript.clear();
                 *status = "idle".into();
                 grow_node_to_fit_contents(node);
                 self.touch();
@@ -737,13 +760,23 @@ fn dynamic_body_height(node: &GraphNode) -> Option<f32> {
         | NodeValue::DynamicContext(text)
         | NodeValue::Hook(text)
         | NodeValue::OutputSchema(text) => text.as_str(),
-        NodeValue::TextOutput { text, status } => {
-            return dynamic_text_height(node, &format!("status = {status}\n\n{text}"));
+        NodeValue::TextOutput { transcript, status } => {
+            let body = transcript_display_text(transcript);
+            return dynamic_text_height(node, &format!("status = {status}\n\n{body}"));
         }
         _ => return None,
     };
 
     dynamic_text_height(node, text)
+}
+
+/// Flatten a transcript into role-labeled text for sizing/preview purposes.
+fn transcript_display_text(transcript: &[ConversationTurn]) -> String {
+    transcript
+        .iter()
+        .map(|turn| format!("{}: {}", turn.role.label(), turn.text))
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 fn dynamic_text_height(node: &GraphNode, text: &str) -> Option<f32> {
@@ -962,13 +995,52 @@ mod tests {
             .expect("demo graph should have a text output node");
         let initial_height = graph.node(output_node).expect("output node").size.y;
 
-        graph.set_output_result(
+        graph.append_output_turns(
             output_node,
-            "This is a much longer response that should wrap across several lines inside the output surface without being truncated by the default preview renderer.".into(),
-            "completed via test provider / model".into(),
+            vec![
+                ConversationTurn::user("Tell me a long story."),
+                ConversationTurn::assistant(
+                    "This is a much longer response that should wrap across several lines inside the output surface without being truncated by the default preview renderer.",
+                ),
+            ],
+            "completed via test provider / model",
         );
 
         let grown_height = graph.node(output_node).expect("output node").size.y;
         assert!(grown_height > initial_height);
+    }
+
+    #[test]
+    fn append_output_turns_accumulates_transcript() {
+        let mut graph = GraphDocument::demo();
+        let output_node = graph
+            .first_node_id_by_type(NodeType::TextOutput)
+            .expect("demo graph should have a text output node");
+
+        graph.append_output_turns(
+            output_node,
+            vec![
+                ConversationTurn::user("hi"),
+                ConversationTurn::assistant("hello"),
+            ],
+            "completed",
+        );
+        graph.append_output_turns(
+            output_node,
+            vec![
+                ConversationTurn::user("again"),
+                ConversationTurn::assistant("welcome back"),
+            ],
+            "completed",
+        );
+
+        let NodeValue::TextOutput { transcript, .. } =
+            &graph.node(output_node).expect("output node").value
+        else {
+            panic!("expected a text output node");
+        };
+        assert_eq!(transcript.len(), 4);
+        assert_eq!(transcript[0].text, "hi");
+        assert_eq!(transcript[3].text, "welcome back");
     }
 }

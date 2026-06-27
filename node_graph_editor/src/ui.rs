@@ -17,7 +17,7 @@ use bevy::{
 };
 
 use crate::{
-    catalog::{PortSpec, node_inputs, node_outputs},
+    catalog::{ChatRole, PortSpec, node_inputs, node_outputs},
     compile::compile_agent_run,
     graph::{
         DraggingWire, EditorSession, GraphDocument, GraphNode, NodeId, NodeTemplate, NodeType,
@@ -1378,9 +1378,8 @@ fn handle_node_buttons(
                             .agent_name
                             .clone()
                             .unwrap_or_else(|| format!("agent#{}", request.agent_id));
-                        document.set_output_result(
+                        document.set_output_status(
                             output_node,
-                            "Running selected graph…".into(),
                             format!("queued via {provider_label} / {model} as {agent_label}"),
                         );
                         if let Err(error) = runtime.request_run(request) {
@@ -1393,11 +1392,7 @@ fn handle_node_buttons(
             NodeAction::StopRun(node_id) => {
                 session.select_node(Some(node_id));
                 if let Some(output_node) = runtime.stop_run() {
-                    document.set_output_result(
-                        output_node,
-                        "Run stopped.".into(),
-                        "stopped".into(),
-                    );
+                    document.set_output_status(output_node, "stopped");
                 }
             }
             NodeAction::ClearOutput(node_id) => {
@@ -4612,8 +4607,8 @@ fn spawn_text_output_surface(
     fonts: &EditorFont,
     zoom: f32,
 ) {
-    let (status, text) = match &node.value {
-        NodeValue::TextOutput { text, status } => (status.as_str(), text.as_str()),
+    let (status, transcript) = match &node.value {
+        NodeValue::TextOutput { transcript, status } => (status.as_str(), transcript.as_slice()),
         _ => return,
     };
 
@@ -4645,17 +4640,53 @@ fn spawn_text_output_surface(
             TextColor(Color::srgb_u8(170, 176, 186)),
             Pickable::IGNORE,
         ));
-        surface.spawn((
-            Node {
-                width: Val::Percent(100.0),
-                ..default()
-            },
-            Text::new(text),
-            TextLayout::linebreak(LineBreak::WordOrCharacter),
-            editor_text_font(fonts, scaled_font(13.0, zoom)),
-            TextColor(Color::srgb_u8(244, 246, 248)),
-            Pickable::IGNORE,
-        ));
+
+        if transcript.is_empty() {
+            surface.spawn((
+                Node {
+                    width: Val::Percent(100.0),
+                    ..default()
+                },
+                Text::new("Run the agent to start the conversation."),
+                TextLayout::linebreak(LineBreak::WordOrCharacter),
+                editor_text_font(fonts, scaled_font(13.0, zoom)),
+                TextColor(Color::srgb_u8(130, 136, 146)),
+                Pickable::IGNORE,
+            ));
+            return;
+        }
+
+        // Render the accumulated conversation as role-labeled turns.
+        for turn in transcript {
+            let (label_color, text_color) = match turn.role {
+                ChatRole::User => (Color::srgb_u8(126, 176, 255), Color::srgb_u8(208, 214, 222)),
+                ChatRole::Assistant => {
+                    (Color::srgb_u8(150, 226, 168), Color::srgb_u8(244, 246, 248))
+                }
+            };
+            surface.spawn((
+                Node {
+                    width: Val::Percent(100.0),
+                    ..default()
+                },
+                Text::new(turn.role.label()),
+                TextLayout::linebreak(LineBreak::WordOrCharacter),
+                editor_text_font(fonts, scaled_font(11.0, zoom)),
+                TextColor(label_color),
+                Pickable::IGNORE,
+            ));
+            surface.spawn((
+                Node {
+                    width: Val::Percent(100.0),
+                    ..default()
+                },
+                Text::new(turn.text.clone()),
+                TextLayout::linebreak(LineBreak::WordOrCharacter),
+                editor_text_font(fonts, scaled_font(13.0, zoom)),
+                TextColor(text_color),
+                Pickable::IGNORE,
+            ));
+        }
     });
 }
 

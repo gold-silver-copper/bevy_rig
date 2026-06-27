@@ -1314,6 +1314,7 @@ dependencies = [
  "directories-next",
  "reqwest 0.12.28",
  "rig-core",
+ "rig-memory",
  "schemars",
  "serde",
  "serde_json",
@@ -5702,7 +5703,7 @@ dependencies = [
 [[package]]
 name = "rig-core"
 version = "0.39.0"
-source = "git+https://github.com/0xPlaygrounds/rig?branch=main#00573a9994d9ccd54bb56eb6010a7279b6163016"
+source = "git+https://github.com/0xPlaygrounds/rig?branch=main#6b1991bfb246411dd75839c8611e801a2309d33c"
 dependencies = [
  "as-any",
  "async-stream",
@@ -5735,7 +5736,7 @@ dependencies = [
 [[package]]
 name = "rig-derive"
 version = "0.39.0"
-source = "git+https://github.com/0xPlaygrounds/rig?branch=main#00573a9994d9ccd54bb56eb6010a7279b6163016"
+source = "git+https://github.com/0xPlaygrounds/rig?branch=main#6b1991bfb246411dd75839c8611e801a2309d33c"
 dependencies = [
  "convert_case 0.11.0",
  "deluxe",
@@ -5745,6 +5746,15 @@ dependencies = [
  "quote",
  "serde_json",
  "syn",
+]
+
+[[package]]
+name = "rig-memory"
+version = "0.39.0"
+source = "git+https://github.com/0xPlaygrounds/rig?branch=main#6b1991bfb246411dd75839c8611e801a2309d33c"
+dependencies = [
+ "rig-core",
+ "tracing",
 ]
 
 [[package]]

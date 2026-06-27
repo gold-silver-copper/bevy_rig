@@ -104,12 +104,55 @@ pub enum NodeType {
     OutputSchema,
 }
 
+/// Who authored a turn in an Agent's conversation transcript.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChatRole {
+    User,
+    Assistant,
+}
+
+impl ChatRole {
+    /// Short label shown before each turn in the transcript view.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::User => "you",
+            Self::Assistant => "ai",
+        }
+    }
+}
+
+/// One message in an Agent's accumulated conversation. Kept deliberately
+/// lightweight (and decoupled from rig's `Message`) so it is easy to display
+/// and edit; conversion to `rig::completion::Message` happens at the runtime
+/// boundary.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConversationTurn {
+    pub role: ChatRole,
+    pub text: String,
+}
+
+impl ConversationTurn {
+    pub fn user(text: impl Into<String>) -> Self {
+        Self {
+            role: ChatRole::User,
+            text: text.into(),
+        }
+    }
+
+    pub fn assistant(text: impl Into<String>) -> Self {
+        Self {
+            role: ChatRole::Assistant,
+            text: text.into(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum NodeValue {
     None,
     Text(String),
     TextOutput {
-        text: String,
+        transcript: Vec<ConversationTurn>,
         status: String,
     },
     Model {
@@ -172,10 +215,7 @@ impl NodeValue {
                 }
                 Err(_) => false,
             },
-            Self::TextOutput { text, .. } => {
-                *text = value.to_string();
-                true
-            }
+            // The transcript is run-managed (append-only), so it is not inline-editable.
             _ => false,
         }
     }
@@ -246,7 +286,7 @@ impl NodeTemplate {
                 node_type: NodeType::TextOutput,
                 title: "Text Output".into(),
                 value: NodeValue::TextOutput {
-                    text: "Run the selected agent to populate this sink.".into(),
+                    transcript: Vec::new(),
                     status: "idle".into(),
                 },
             },
